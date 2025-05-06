@@ -15,7 +15,7 @@ use crate::arrays::{
     get_u8_array, get_u16_array,
 };
 use crate::error;
-use crate::otlp::related_data::RelatedData;
+use crate::otlp::metrics::related_data::RelatedData;
 use crate::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::proto::opentelemetry::common::v1::InstrumentationScope;
 use crate::proto::opentelemetry::metrics::v1::metric;
@@ -27,6 +27,10 @@ use arrow::datatypes::DataType::UInt32;
 use arrow::datatypes::{DataType, Field, Fields};
 use num_enum::TryFromPrimitive;
 use snafu::{OptionExt, ResultExt};
+
+pub mod data_points;
+pub mod exemplar;
+pub mod related_data;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, TryFromPrimitive)]
 #[repr(u8)]

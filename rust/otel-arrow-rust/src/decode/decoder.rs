@@ -13,8 +13,8 @@
 use crate::decode::record_message::RecordMessage;
 use crate::error;
 use crate::opentelemetry::{ArrowPayload, ArrowPayloadType, BatchArrowRecords};
-use crate::otlp::metric::metrics_from;
-use crate::otlp::related_data::RelatedData;
+use crate::otlp::metrics::{metrics_from, related_data::RelatedData};
+// use crate::otlp::related_data::RelatedData;
 use crate::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use arrow::array::RecordBatch;
 use arrow::error::ArrowError;

@@ -16,7 +16,7 @@ use crate::arrays::{
 };
 use crate::error;
 use crate::otlp::attributes::store::Attribute32Store;
-use crate::otlp::metric::AppendAndGet;
+use crate::otlp::metrics::AppendAndGet;
 use crate::proto::opentelemetry::metrics::v1::Exemplar;
 use crate::proto::opentelemetry::metrics::v1::exemplar::Value;
 use crate::schema::consts;
