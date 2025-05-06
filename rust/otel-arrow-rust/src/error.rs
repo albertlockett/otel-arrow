@@ -137,6 +137,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Log record not found"))]
+    LogRecordNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Metric record not found"))]
     MetricRecordNotFound {
         #[snafu(implicit)]

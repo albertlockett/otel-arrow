@@ -54,7 +54,10 @@ impl RelatedData {
         self.metric_id += delta;
         self.metric_id
     }
-
+    
+    // TODO: should put a comment what this function returns as
+    // the second argument in the tuple 
+    // (alternatively, see comment on logs/related_data.rs same method)
     pub fn from_record_messages(
         rbs: &[RecordMessage],
     ) -> error::Result<(RelatedData, Option<usize>)> {
