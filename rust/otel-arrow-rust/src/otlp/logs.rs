@@ -19,10 +19,20 @@ pub fn logs_from(
 
 #[cfg(test)]
 mod test {
+    use std::{fs::File, io::Read};
+
+    use prost::Message;
+
+    use crate::opentelemetry::BatchArrowRecords;
 
     // TODO delete this and replace with tests using the validation suite
     #[test]
     fn smoke_test() {
+        let mut file = File::open("/Users/a.lockett/Desktop/otap_logs.pb").unwrap();
+        let mut contents = vec![];
+        file.read_to_end(&mut contents).unwrap();
+
+        let bar = BatchArrowRecords::decode(contents.as_ref()).unwrap();
 
     }
 }
