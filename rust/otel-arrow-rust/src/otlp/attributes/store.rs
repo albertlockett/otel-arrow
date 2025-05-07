@@ -12,17 +12,15 @@
 
 use crate::arrays::{
     Int64ArrayAccessor, MaybeDictArrayAccessor, NullableArrayAccessor, StringArrayAccessor,
-    get_binary_array_opt, get_bool_array_opt, get_f64_array_opt, get_i64_array_opt, get_u8_array,
+    get_binary_array_opt, get_bool_array_opt, get_f64_array_opt, get_u8_array,
 };
 use crate::error;
 use crate::otlp::attributes::parent_id::ParentId;
 use crate::proto::opentelemetry::common::v1::any_value::Value;
 use crate::proto::opentelemetry::common::v1::{AnyValue, KeyValue};
 use crate::schema::consts;
-use arrow::array::{
-    Array, ArrowPrimitiveType, Int64Array, PrimitiveArray, RecordBatch, UInt64Array,
-};
-use arrow::datatypes::{Schema, UInt16Type, UInt32Type, UInt64Type};
+use arrow::array::{ArrowPrimitiveType, PrimitiveArray, RecordBatch};
+use arrow::datatypes::Schema;
 use num_enum::TryFromPrimitive;
 use snafu::{OptionExt, ResultExt};
 use std::collections::HashMap;
@@ -65,28 +63,11 @@ where
     }
 }
 
-pub trait HasPrimitiveArray {
-    type Prim: ArrowPrimitiveType;
-    type ArrayType: Array;
-
-    fn check_array_type() {}
-}
-
-impl HasPrimitiveArray for u16 {
-    type Prim = UInt16Type;
-    type ArrayType = PrimitiveArray<UInt16Type>;
-}
-
-impl HasPrimitiveArray for u32 {
-    type Prim = UInt32Type;
-    type ArrayType = PrimitiveArray<UInt32Type>;
-}
-
 impl<T> TryFrom<&RecordBatch> for AttributeStore<T>
 where
-    T: ParentId + HasPrimitiveArray,
-    <T as ParentId>::Array: Array,
-    <<T as HasPrimitiveArray>::Prim as ArrowPrimitiveType>::Native: Into<T>,
+    T: ParentId,
+    <T as ParentId>::ArrayType: ArrowPrimitiveType,
+    <<T as ParentId>::ArrayType as ArrowPrimitiveType>::Native: Into<T>,
 {
     type Error = error::Error;
 
@@ -106,7 +87,6 @@ where
                 })?,
         )?;
 
-        // let value_int_arr = get_i64_array_opt(rb, consts::ATTRIBUTE_INT)?;
         let value_int_arr = Int64ArrayAccessor::try_new(
             rb.column_by_name(consts::ATTRIBUTE_INT)
                 .context(error::ColumnNotFoundSnafu {
@@ -155,9 +135,10 @@ where
                     .context(error::ColumnNotFoundSnafu {
                         name: consts::PARENT_ID,
                     })?;
-            let parent_id_arr = MaybeDictArrayAccessor::<
-                PrimitiveArray<<T as HasPrimitiveArray>::Prim>,
-            >::try_new(parent_id_arr)?;
+            let parent_id_arr =
+                MaybeDictArrayAccessor::<PrimitiveArray<<T as ParentId>::ArrayType>>::try_new(
+                    parent_id_arr,
+                )?;
 
             // Curious, but looks like this is not used anywhere in otel-arrow
             // See https://github.com/open-telemetry/otel-arrow/blob/985aa1500a012859cec44855e187eacf46eda7c8/pkg/otel/common/otlp/attributes.go#L134

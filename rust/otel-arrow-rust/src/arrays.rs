@@ -13,12 +13,11 @@
 use crate::error::{self, InvalidListArraySnafu};
 use arrow::array::{
     Array, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanArray, DictionaryArray,
-    FixedSizeBinaryArray, FixedSizeListArray, Float32Array, Float64Array, GenericBinaryArray,
-    GenericByteArray, Int8Array, Int16Array, Int32Array, Int64Array, OffsetSizeTrait,
-    PrimitiveArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array,
-    UInt32Array, UInt64Array,
+    FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+    Int64Array, PrimitiveArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow::datatypes::{ArrowDictionaryKeyType, ByteArrayType, TimeUnit};
+use arrow::datatypes::{ArrowDictionaryKeyType, TimeUnit};
 use arrow::datatypes::{ArrowNativeType, DataType, UInt8Type, UInt16Type};
 use paste::paste;
 use snafu::{OptionExt, ensure};
@@ -72,27 +71,6 @@ where
         }
     }
 }
-
-// impl<T> NullableArrayAccessor for GenericByteArray<T>
-// where
-//     T: ByteArrayType,
-//     for<'a> <T as ByteArrayType>::Native: From<&'a <T as ByteArrayType>::Native>
-//     // T::Native:  Into<T::Native>,
-// {
-//     type Native = T::Native;
-
-//     fn value_at(&self, idx: usize) -> Option<Self::Native> {
-//         if self.is_valid(idx) {
-//             // let boob: T::Native = self.value(idx).into();
-//             // Some(boob)
-//             Some(self.value(idx).into())
-
-//             // todo!()
-//         } else {
-//             None
-//         }
-//     }
-// }
 
 impl NullableArrayAccessor for BooleanArray {
     type Native = bool;

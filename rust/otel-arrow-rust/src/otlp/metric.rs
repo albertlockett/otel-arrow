@@ -11,8 +11,8 @@
 // limitations under the License.
 
 use crate::arrays::{
-    Int32ArrayAccessor, MaybeDictArrayAccessor, NullableArrayAccessor, StringArrayAccessor,
-    get_bool_array_opt, get_i32_array_opt, get_u8_array, get_u16_array,
+    Int32ArrayAccessor, NullableArrayAccessor, StringArrayAccessor, get_bool_array_opt,
+    get_u8_array, get_u16_array,
 };
 use crate::error;
 use crate::otlp::related_data::RelatedData;
@@ -21,8 +21,7 @@ use crate::proto::opentelemetry::common::v1::InstrumentationScope;
 use crate::proto::opentelemetry::metrics::v1::metric;
 use crate::schema::consts;
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, StructArray, UInt8Array,
-    UInt16Array, UInt32Array,
+    Array, ArrayRef, BooleanArray, RecordBatch, StructArray, UInt8Array, UInt16Array, UInt32Array,
 };
 use arrow::datatypes::DataType::UInt32;
 use arrow::datatypes::{DataType, Field, Fields};
@@ -176,16 +175,6 @@ impl<'a> TryFrom<&'a RecordBatch> for ScopeArrays<'a> {
             .column_by_name(consts::VERSION)
             .map(StringArrayAccessor::try_new)
             .transpose()?;
-        // .map(|a| {
-        //     a.as_any().downcast_ref::<StringArray>().context(
-        //         error::ColumnDataTypeMismatchSnafu {
-        //             name: consts::VERSION,
-        //             expect: DataType::Utf8,
-        //             actual: a.data_type().clone(),
-        //         },
-        //     )
-        // })
-        // .transpose()?;
 
         let dropped_attributes_count = scope_array
             .column_by_name(consts::DROPPED_ATTRIBUTES_COUNT)

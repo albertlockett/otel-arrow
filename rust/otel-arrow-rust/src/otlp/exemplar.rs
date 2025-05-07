@@ -11,8 +11,8 @@
 // limitations under the License.
 
 use crate::arrays::{
-    FixedSizeBinaryArrayAccessor, MaybeDictArrayAccessor, NullableArrayAccessor, get_f64_array_opt,
-    get_i64_array_opt, get_timestamp_nanosecond_array, get_u32_array, get_u32_array_opt,
+    FixedSizeBinaryArrayAccessor, NullableArrayAccessor, get_f64_array_opt, get_i64_array_opt,
+    get_timestamp_nanosecond_array, get_u32_array, get_u32_array_opt,
 };
 use crate::error;
 use crate::otlp::attributes::store::Attribute32Store;
@@ -51,7 +51,6 @@ impl ExemplarsStore {
         let double_value_arr = get_f64_array_opt(rb, consts::DOUBLE_VALUE)?;
         let parent_id_arr = get_u32_array(rb, consts::PARENT_ID)?;
         let time_unix_nano_arr = get_timestamp_nanosecond_array(rb, consts::TIME_UNIX_NANO)?;
-        // let span_id_arr = get_binary_array_opt(rb, consts::SPAN_ID)?;
         let span_id_arr = FixedSizeBinaryArrayAccessor::try_new(
             rb.column_by_name(consts::SPAN_ID)
                 .context(error::ColumnNotFoundSnafu {
