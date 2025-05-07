@@ -156,12 +156,12 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Unsupported dictionary value type. expect {}, actual {}",
-        expect,
+        "Unsupported dictionary value type. expect {:?}, actual {}",
+        expect_oneof,
         actual
     ))]
     UnsupportedDictionaryValueType {
-        expect: DataType,
+        expect_oneof: Vec<DataType>,
         actual: DataType,
         #[snafu(implicit)]
         location: Location,

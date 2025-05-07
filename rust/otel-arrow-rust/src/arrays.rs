@@ -234,9 +234,70 @@ where
     }
 }
 
-pub type DictionaryStringArrayAccessor<'a, K> = DictionaryArrayAccessor<'a, K, StringArray>;
+pub enum ByteArrayAccessor<'a> {
+    Binary(MaybeDictArrayAccessor<'a, BinaryArray>),
+    FixedSizeBinary(MaybeDictArrayAccessor<'a, FixedSizeBinaryArray>),
+}
 
-/// Wrapper around an array that might be a dictionary
+impl<'a> ByteArrayAccessor<'a> {
+    pub fn try_new(arr: &'a ArrayRef) -> error::Result<Self> {
+        match arr.data_type() {
+            DataType::Binary => {
+                MaybeDictArrayAccessor::<BinaryArray>::try_new(arr).map(Self::Binary)
+            }
+            DataType::FixedSizeBinary(dims) => {
+                MaybeDictArrayAccessor::<FixedSizeBinaryArray>::try_new(arr, *dims)
+                    .map(Self::FixedSizeBinary)
+            }
+            DataType::Dictionary(_, val) => match **val {
+                DataType::Binary => {
+                    MaybeDictArrayAccessor::<BinaryArray>::try_new(arr).map(Self::Binary)
+                }
+                DataType::FixedSizeBinary(dims) => {
+                    MaybeDictArrayAccessor::<FixedSizeBinaryArray>::try_new(arr, dims)
+                        .map(Self::FixedSizeBinary)
+                }
+                _ => error::UnsupportedDictionaryValueTypeSnafu {
+                    expect_oneof: vec![DataType::Binary, DataType::FixedSizeBinary(-1)],
+                    actual: (**val).clone(),
+                }
+                .fail(),
+            },
+            _ => InvalidListArraySnafu {
+                expect_oneof: vec![
+                    DataType::Binary,
+                    DataType::FixedSizeBinary(0),
+                    DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Binary)),
+                    DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Binary)),
+                    DataType::Dictionary(
+                        Box::new(DataType::UInt8),
+                        Box::new(DataType::FixedSizeBinary(-1)),
+                    ),
+                    DataType::Dictionary(
+                        Box::new(DataType::UInt16),
+                        Box::new(DataType::FixedSizeBinary(-1)),
+                    ),
+                ],
+                actual: arr.data_type().clone(),
+            }
+            .fail(),
+        }
+    }
+}
+
+impl NullableArrayAccessor for ByteArrayAccessor<'_> {
+    type Native = Vec<u8>;
+
+    fn value_at(&self, idx: usize) -> Option<Self::Native> {
+        match self {
+            Self::Binary(b) => b.value_at(idx),
+            Self::FixedSizeBinary(b) => b.value_at(idx),
+        }
+    }
+}
+
+/// Wrapper around an array that might be a dictionary or it might just be an unencoded
+/// array of the base type
 pub enum MaybeDictArrayAccessor<'a, V> {
     Native(&'a V),
     Dictionary8(DictionaryArrayAccessor<'a, UInt8Type, V>),
@@ -260,20 +321,26 @@ where
         }
     }
 }
+
 impl<'a, T> MaybeDictArrayAccessor<'a, T>
 where
     T: Array + NullableArrayAccessor + 'static,
 {
+    /// Tries to inspect the passed array to determine if it can be treated as an array
+    /// of the desired datatype. The passed array must either be an array of the datatype,
+    /// or a dictionary where the value is the type
     fn try_new_with_datatype(data_type: DataType, arr: &'a ArrayRef) -> error::Result<Self> {
+        // if the type isn't a dictionary, we treat it as an unencoded array
         if *arr.data_type() == data_type {
             return Ok(Self::Native(arr.as_any().downcast_ref::<T>().unwrap()));
         }
 
+        // determine if the type is a dictionary where the value is the desired datatype
         if let DataType::Dictionary(key, v) = arr.data_type() {
             ensure!(
                 **v == data_type,
                 error::UnsupportedDictionaryValueTypeSnafu {
-                    expect: data_type,
+                    expect_oneof: vec![data_type],
                     actual: (**v).clone()
                 }
             );
@@ -340,7 +407,7 @@ impl<'a> MaybeDictArrayAccessor<'a, StringArray> {
     }
 }
 
-pub type FixedSizeBinaryArrayAccessor<'a> = MaybeDictArrayAccessor<'a, FixedSizeBinaryArray>;
+// pub type FixedSizeBinaryArrayAccessor<'a> = MaybeDictArrayAccessor<'a, FixedSizeBinaryArray>;
 pub type Int32ArrayAccessor<'a> = MaybeDictArrayAccessor<'a, Int32Array>;
 pub type Int64ArrayAccessor<'a> = MaybeDictArrayAccessor<'a, Int64Array>;
 pub type StringArrayAccessor<'a> = MaybeDictArrayAccessor<'a, StringArray>;
