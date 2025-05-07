@@ -55,7 +55,7 @@ impl RelatedData {
                     related_data.scope_attr_map_store = Attribute16Store::try_from(&rm.record)?;
                 }
                 ArrowPayloadType::LogAttrs => {
-                    // related_data.log_record_attr_map_store = Attribute16Store::try_from(&rm.record)?;
+                    related_data.log_record_attr_map_store = Attribute16Store::try_from(&rm.record)?;
                 }
                 _ => {
                     return error::UnsupportedPayloadTypeSnafu {
