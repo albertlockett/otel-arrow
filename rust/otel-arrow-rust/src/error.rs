@@ -96,9 +96,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid List array data type, expect {}, actual {}", expect, actual))]
+    #[snafu(display("Invalid List array data type, expect one of {:?}, actual {}", expect_oneof, actual))]
     InvalidListArray {
-        expect: DataType,
+        expect_oneof: Vec<DataType>,
         actual: DataType,
         #[snafu(implicit)]
         location: Location,
@@ -137,6 +137,22 @@ pub enum Error {
     MetricRecordNotFound {
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Unsupported dictionary key type, expect one of {:?}, actual {}", expect_oneof, actual))]
+    UnsupportedDictionaryKeyType {
+        expect_oneof: Vec<DataType>,
+        actual: DataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported dictionary value type. expect {}, actual {}", expect, actual))]
+    UnsupportedDictionaryValueType {
+        expect: DataType,
+        actual: DataType,
+        #[snafu(implicit)]
+        location: Location
     },
 
     #[snafu(display("Unsupported string column type, given: {}", data_type))]

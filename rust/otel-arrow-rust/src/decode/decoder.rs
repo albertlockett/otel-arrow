@@ -143,6 +143,8 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
+
+    use crate::opentelemetry::BatchArrowRecords;
     use crate::test_util::{create_record_batch, create_test_schema};
     use std::io::Cursor;
     use std::sync::Arc;
@@ -170,5 +172,22 @@ mod tests {
         writer.flush().unwrap();
         *reader.get_mut() = Cursor::new(std::mem::take(writer.get_mut()));
         assert_eq!(batch2, reader.next().unwrap().unwrap());
+    }
+
+    
+    /// TODO don't check this in
+    use std::io::Read;
+    use std::fs::File;
+    use prost::Message;
+    use super::Consumer;
+
+    #[test]
+    fn invoke_decode() {
+        let mut file = File::open("/Users/a.lockett/Desktop/otap_metrics.pb").unwrap();
+        let mut contents = vec![];
+        file.read_to_end(&mut contents).unwrap();
+        let mut bar = BatchArrowRecords::decode(contents.as_ref()).unwrap();
+        let mut consumer = Consumer::default();
+        consumer.consume_metrics_batches(&mut bar).unwrap();
     }
 }

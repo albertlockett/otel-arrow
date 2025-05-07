@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error;
+use crate::error::{self, InvalidListArraySnafu};
 use arrow::array::{
     Array, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanArray, DictionaryArray, Float32Array,
     Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, PrimitiveArray, RecordBatch,
@@ -222,6 +222,70 @@ where
 }
 
 pub type DictionaryStringArrayAccessor<'a, K> = DictionaryArrayAccessor<'a, K, StringArray>;
+
+
+/// Wrapper around 
+pub enum MaybeDictArrayAccessor<'a, V> {
+    Native(&'a V),
+    Dictionary8(DictionaryArrayAccessor<'a, UInt8Type, V>),
+    Dictionary16(DictionaryArrayAccessor<'a, UInt16Type, V>),
+}
+
+impl<V> NullableArrayAccessor for MaybeDictArrayAccessor<'_, PrimitiveArray<V>> 
+where
+    V: ArrowPrimitiveType {
+    type Native = V::Native;
+
+    fn value_at(&self, idx: usize) -> Option<<MaybeDictArrayAccessor<'_, PrimitiveArray<V>> as NullableArrayAccessor>::Native> {
+        match self {
+            Self::Native(s) => s.value_at(idx),
+            Self::Dictionary8(d) => d.value_at(idx),
+            Self::Dictionary16(d) => d.value_at(idx),
+        }
+    }
+}
+
+impl<'a, V> MaybeDictArrayAccessor<'a, PrimitiveArray<V>> where V: ArrowPrimitiveType {
+    pub fn new(arr: &'a ArrayRef) -> error::Result<Self> {
+        if *arr.data_type() == V::DATA_TYPE {
+            return Ok(Self::Native(arr.as_any().downcast_ref::<PrimitiveArray<V>>().unwrap()))
+        }
+
+        if let DataType::Dictionary(key, v) = arr.data_type() {
+            ensure!(**v == V::DATA_TYPE, error::UnsupportedDictionaryValueTypeSnafu {
+                expect: V::DATA_TYPE,
+                actual: (**v).clone()
+            });
+
+            let result = match **key {
+                DataType::UInt8 => Self::Dictionary8(DictionaryArrayAccessor::new(
+                    arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>().unwrap()
+                )),
+                DataType::UInt16 => Self::Dictionary16(DictionaryArrayAccessor::new(
+                    arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>().unwrap()
+                )),
+                _ => {
+                    return error::UnsupportedDictionaryKeyTypeSnafu {
+                        expect_oneof: vec![DataType::UInt8, DataType::UInt16],
+                        actual: (**key).clone(),
+                    }.fail()
+                }
+            };
+
+            return Ok(result)
+        }
+
+        InvalidListArraySnafu {
+            expect_oneof: vec![
+                V::DATA_TYPE,
+                DataType::Dictionary(Box::new(DataType::UInt8), Box::new(V::DATA_TYPE)),
+                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(V::DATA_TYPE))
+            ],
+            actual: arr.data_type().clone()
+        }.fail()
+    }
+}
+
 
 /// [StringArrayAccessor] allows to access string values from [StringArray]s and [DictionaryArray]s.
 pub enum StringArrayAccessor<'a> {
