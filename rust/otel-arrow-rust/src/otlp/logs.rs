@@ -15,3 +15,14 @@ pub fn logs_from(
 ) -> Result<ExportLogsServiceRequest> {
     todo!();
 }
+
+
+#[cfg(test)]
+mod test {
+
+    // TODO delete this and replace with tests using the validation suite
+    #[test]
+    fn smoke_test() {
+
+    }
+}

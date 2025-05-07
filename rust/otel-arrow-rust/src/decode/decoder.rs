@@ -106,6 +106,7 @@ impl Consumer {
         Ok(records)
     }
 
+    // TODO need to invoke this from the validation code
     pub fn consume_logs_batches(
         &mut self,
         records: &mut BatchArrowRecords,
@@ -140,7 +141,7 @@ impl Consumer {
                 metrics_from(&record_message[metric_rec_idx].record, &mut related_data)
             }
             // TODO need to also handle MultivariateMetrics
-            
+
             main_record_type => error::UnsupportedPayloadTypeSnafu {
                 actual: main_record_type,
             }
