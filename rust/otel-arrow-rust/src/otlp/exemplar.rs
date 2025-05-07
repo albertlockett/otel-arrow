@@ -11,7 +11,8 @@
 // limitations under the License.
 
 use crate::arrays::{
-    get_binary_array_opt, get_f64_array_opt, get_i64_array_opt, get_timestamp_nanosecond_array, get_u32_array, get_u32_array_opt, MaybeDictArrayAccessor, NullableArrayAccessor
+    FixedSizeBinaryArrayAccessor, MaybeDictArrayAccessor, NullableArrayAccessor, get_f64_array_opt,
+    get_i64_array_opt, get_timestamp_nanosecond_array, get_u32_array, get_u32_array_opt,
 };
 use crate::error;
 use crate::otlp::attributes::store::Attribute32Store;
@@ -19,9 +20,9 @@ use crate::otlp::metric::AppendAndGet;
 use crate::proto::opentelemetry::metrics::v1::Exemplar;
 use crate::proto::opentelemetry::metrics::v1::exemplar::Value;
 use crate::schema::consts;
-use arrow::array::{BinaryArray, FixedSizeBinaryArray, RecordBatch};
+use arrow::array::RecordBatch;
 use num_enum::TryFromPrimitive;
-use snafu::{ensure, OptionExt};
+use snafu::{OptionExt, ensure};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -51,18 +52,19 @@ impl ExemplarsStore {
         let parent_id_arr = get_u32_array(rb, consts::PARENT_ID)?;
         let time_unix_nano_arr = get_timestamp_nanosecond_array(rb, consts::TIME_UNIX_NANO)?;
         // let span_id_arr = get_binary_array_opt(rb, consts::SPAN_ID)?;
-        let span_id_arr = MaybeDictArrayAccessor::<FixedSizeBinaryArray>::new(
-            rb.column_by_name(consts::SPAN_ID).context(error::ColumnNotFoundSnafu {
-                name: consts::SPAN_ID,
-            })?,
-            8
+        let span_id_arr = FixedSizeBinaryArrayAccessor::try_new(
+            rb.column_by_name(consts::SPAN_ID)
+                .context(error::ColumnNotFoundSnafu {
+                    name: consts::SPAN_ID,
+                })?,
+            8,
         )?;
-        // let trace_id_arr = get_binary_array_opt(rb, consts::TRACE_ID)?;
-        let trace_id_arr = MaybeDictArrayAccessor::<FixedSizeBinaryArray>::new(
-            rb.column_by_name(consts::TRACE_ID).context(error::ColumnNotFoundSnafu {
-                name: consts::TRACE_ID
-            })?,
-            16
+        let trace_id_arr = FixedSizeBinaryArrayAccessor::try_new(
+            rb.column_by_name(consts::TRACE_ID)
+                .context(error::ColumnNotFoundSnafu {
+                    name: consts::TRACE_ID,
+                })?,
+            16,
         )?;
 
         for idx in 0..rb.num_rows() {

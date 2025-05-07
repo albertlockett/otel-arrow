@@ -174,12 +174,11 @@ mod tests {
         assert_eq!(batch2, reader.next().unwrap().unwrap());
     }
 
-    
+    use super::Consumer;
+    use prost::Message;
+    use std::fs::File;
     /// TODO don't check this in
     use std::io::Read;
-    use std::fs::File;
-    use prost::Message;
-    use super::Consumer;
 
     #[test]
     fn invoke_decode() {

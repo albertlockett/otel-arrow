@@ -11,7 +11,8 @@
 // limitations under the License.
 
 use crate::arrays::{
-    get_bool_array_opt, get_i32_array_opt, get_u16_array, get_u8_array, MaybeDictArrayAccessor, NullableArrayAccessor, StringArrayAccessor
+    Int32ArrayAccessor, MaybeDictArrayAccessor, NullableArrayAccessor, StringArrayAccessor,
+    get_bool_array_opt, get_i32_array_opt, get_u8_array, get_u16_array,
 };
 use crate::error;
 use crate::otlp::related_data::RelatedData;
@@ -94,7 +95,7 @@ impl<'a> TryFrom<&'a RecordBatch> for ResourceArrays<'a> {
 
         let schema_url = struct_array
             .column_by_name(consts::SCHEMA_URL)
-            .map(StringArrayAccessor::new)
+            .map(StringArrayAccessor::try_new)
             .transpose()?;
 
         Ok(Self {
@@ -168,23 +169,23 @@ impl<'a> TryFrom<&'a RecordBatch> for ScopeArrays<'a> {
 
         let name = scope_array
             .column_by_name(consts::NAME)
-            .map(StringArrayAccessor::new)
+            .map(StringArrayAccessor::try_new)
             .transpose()?;
 
         let version = scope_array
             .column_by_name(consts::VERSION)
-            .map(StringArrayAccessor::new)
+            .map(StringArrayAccessor::try_new)
             .transpose()?;
-            // .map(|a| {
-            //     a.as_any().downcast_ref::<StringArray>().context(
-            //         error::ColumnDataTypeMismatchSnafu {
-            //             name: consts::VERSION,
-            //             expect: DataType::Utf8,
-            //             actual: a.data_type().clone(),
-            //         },
-            //     )
-            // })
-            // .transpose()?;
+        // .map(|a| {
+        //     a.as_any().downcast_ref::<StringArray>().context(
+        //         error::ColumnDataTypeMismatchSnafu {
+        //             name: consts::VERSION,
+        //             expect: DataType::Utf8,
+        //             actual: a.data_type().clone(),
+        //         },
+        //     )
+        // })
+        // .transpose()?;
 
         let dropped_attributes_count = scope_array
             .column_by_name(consts::DROPPED_ATTRIBUTES_COUNT)
@@ -228,7 +229,7 @@ struct MetricsArrays<'a> {
     name: StringArrayAccessor<'a>,
     description: Option<StringArrayAccessor<'a>>,
     unit: Option<StringArrayAccessor<'a>>,
-    aggregation_temporality: Option<MaybeDictArrayAccessor<'a, Int32Array>>,
+    aggregation_temporality: Option<Int32ArrayAccessor<'a>>,
     is_monotonic: Option<&'a BooleanArray>,
 }
 
@@ -238,28 +239,27 @@ impl<'a> TryFrom<&'a RecordBatch> for MetricsArrays<'a> {
     fn try_from(rb: &'a RecordBatch) -> Result<Self, Self::Error> {
         let id = get_u16_array(rb, consts::ID)?;
         let metric_type = get_u8_array(rb, consts::METRIC_TYPE)?;
-        let name = StringArrayAccessor::new(
+        let name = StringArrayAccessor::try_new(
             rb.column_by_name(consts::NAME)
                 .context(error::ColumnNotFoundSnafu { name: consts::NAME })?,
         )?;
 
         let description = rb
             .column_by_name(consts::DESCRIPTION)
-            .map(StringArrayAccessor::new)
+            .map(StringArrayAccessor::try_new)
             .transpose()?;
         let schema_url = rb
             .column_by_name(consts::SCHEMA_URL)
-            .map(StringArrayAccessor::new)
+            .map(StringArrayAccessor::try_new)
             .transpose()?;
 
         let unit = rb
             .column_by_name(consts::UNIT)
-            .map(StringArrayAccessor::new)
+            .map(StringArrayAccessor::try_new)
             .transpose()?;
-        // let aggregation_temporality = get_i32_array_opt(rb, consts::AGGREGATION_TEMPORALITY)?;
-        // let aggregaction_temporality = MaybeDictArrayAccessor::<Int32Array>::new()
-        let aggregation_temporality = rb.column_by_name(consts::AGGREGATION_TEMPORALITY)
-            .map(MaybeDictArrayAccessor::<Int32Array>::new)
+        let aggregation_temporality = rb
+            .column_by_name(consts::AGGREGATION_TEMPORALITY)
+            .map(Int32ArrayAccessor::try_new)
             .transpose()?;
         let is_monotonic = get_bool_array_opt(rb, consts::IS_MONOTONIC)?;
         Ok(Self {
