@@ -17,22 +17,27 @@ pub fn logs_from(
 }
 
 
+
 #[cfg(test)]
 mod test {
-    use std::{fs::File, io::Read};
-
+    use std::fs::File;
+    use std::io::Read;
     use prost::Message;
-
+    
+    use crate::Consumer;
     use crate::opentelemetry::BatchArrowRecords;
 
-    // TODO delete this and replace with tests using the validation suite
+    //  TODO -- this probably isn't how we want to test this, but I can't seem
+    // to dream up a better way
     #[test]
     fn smoke_test() {
         let mut file = File::open("/Users/a.lockett/Desktop/otap_logs.pb").unwrap();
         let mut contents = vec![];
         file.read_to_end(&mut contents).unwrap();
+        let mut bar = BatchArrowRecords::decode(contents.as_ref()).unwrap();
 
-        let bar = BatchArrowRecords::decode(contents.as_ref()).unwrap();
-
+        let mut consumer = Consumer::default();
+        let res = consumer.consume_logs_batches(&mut bar);
+        res.unwrap();
     }
 }

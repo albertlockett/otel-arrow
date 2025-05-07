@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::decode::record_message::RecordMessage;
-use crate::error::Result;
+use crate::error;
+use crate::opentelemetry::ArrowPayloadType;
 use crate::otlp::attributes::store::Attribute16Store;
 
 #[derive(Default)]
@@ -35,7 +36,35 @@ impl RelatedData {
     // implement the From trait for this struct
     pub fn from_record_messages(
         rbs: &[RecordMessage]
-    ) -> Result<(Self, Option<usize>)> {
-        todo!();
+    ) -> error::Result<(Self, Option<usize>)> {
+        let mut related_data = RelatedData::default();
+        let mut logs_record_idx: Option<usize> = None;
+
+        for (idx, rm) in rbs.iter().enumerate() {
+            println!("SCHEMA IS {:#?}\n---", rm.record.schema());
+            arrow::util::pretty::print_batches(&[rm.record.clone()]);
+
+            match rm.payload_type {
+                ArrowPayloadType::Logs => {
+                    logs_record_idx = Some(idx)
+                },
+                ArrowPayloadType::ResourceAttrs => {
+                    related_data.res_attr_map_store = Attribute16Store::try_from(&rm.record)?;
+                },
+                ArrowPayloadType::ScopeAttrs => {
+                    related_data.scope_attr_map_store = Attribute16Store::try_from(&rm.record)?;
+                }
+                ArrowPayloadType::LogAttrs => {
+                    // related_data.log_record_attr_map_store = Attribute16Store::try_from(&rm.record)?;
+                }
+                _ => {
+                    return error::UnsupportedPayloadTypeSnafu {
+                        actual: rm.payload_type
+                    }.fail()
+                }
+            }
+        }
+
+        return Ok((related_data, logs_record_idx))
     }
 }

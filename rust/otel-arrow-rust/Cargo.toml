@@ -12,7 +12,7 @@ trace = []
 derive = []
 
 [dependencies]
-arrow = "53"
+arrow = { version = "53", features = ["prettyprint"] }
 arrow-ipc = { version = "53", features = ["zstd"] }
 lazy_static = "1.5"
 num_enum = "0.7"
