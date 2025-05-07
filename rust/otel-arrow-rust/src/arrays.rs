@@ -12,11 +12,9 @@
 
 use crate::error::{self, InvalidListArraySnafu};
 use arrow::array::{
-    Array, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanArray, DictionaryArray, Float32Array,
-    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, PrimitiveArray, RecordBatch,
-    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanArray, DictionaryArray, FixedSizeBinaryArray, FixedSizeListArray, Float32Array, Float64Array, GenericBinaryArray, GenericByteArray, Int16Array, Int32Array, Int64Array, Int8Array, OffsetSizeTrait, PrimitiveArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array
 };
-use arrow::datatypes::{ArrowDictionaryKeyType, TimeUnit};
+use arrow::datatypes::{ArrowDictionaryKeyType, ByteArrayType, TimeUnit};
 use arrow::datatypes::{ArrowNativeType, DataType, UInt8Type, UInt16Type};
 use paste::paste;
 use snafu::{OptionExt, ensure};
@@ -71,6 +69,27 @@ where
     }
 }
 
+// impl<T> NullableArrayAccessor for GenericByteArray<T>
+// where
+//     T: ByteArrayType,
+//     for<'a> <T as ByteArrayType>::Native: From<&'a <T as ByteArrayType>::Native>
+//     // T::Native:  Into<T::Native>,
+// {
+//     type Native = T::Native;
+
+//     fn value_at(&self, idx: usize) -> Option<Self::Native> {
+//         if self.is_valid(idx) {
+//             // let boob: T::Native = self.value(idx).into();
+//             // Some(boob)
+//             Some(self.value(idx).into())
+
+//             // todo!()
+//         } else {
+//             None
+//         }
+//     }
+// }
+
 impl NullableArrayAccessor for BooleanArray {
     type Native = bool;
 
@@ -84,6 +103,18 @@ impl NullableArrayAccessor for BooleanArray {
 }
 
 impl NullableArrayAccessor for BinaryArray {
+    type Native = Vec<u8>;
+
+    fn value_at(&self, idx: usize) -> Option<Self::Native> {
+        if self.is_valid(idx) {
+            Some(self.value(idx).to_vec())
+        } else {
+            None
+        }
+    }
+}
+
+impl NullableArrayAccessor for FixedSizeBinaryArray {
     type Native = Vec<u8>;
 
     fn value_at(&self, idx: usize) -> Option<Self::Native> {
@@ -231,12 +262,25 @@ pub enum MaybeDictArrayAccessor<'a, V> {
     Dictionary16(DictionaryArrayAccessor<'a, UInt16Type, V>),
 }
 
-impl<V> NullableArrayAccessor for MaybeDictArrayAccessor<'_, PrimitiveArray<V>> 
-where
-    V: ArrowPrimitiveType {
-    type Native = V::Native;
+// impl<V> NullableArrayAccessor for MaybeDictArrayAccessor<'_, PrimitiveArray<V>> 
+// where
+//     V: ArrowPrimitiveType {
+//     type Native = V::Native;
 
-    fn value_at(&self, idx: usize) -> Option<<MaybeDictArrayAccessor<'_, PrimitiveArray<V>> as NullableArrayAccessor>::Native> {
+//     fn value_at(&self, idx: usize) -> Option<<MaybeDictArrayAccessor<'_, PrimitiveArray<V>> as NullableArrayAccessor>::Native> {
+//         match self {
+//             Self::Native(s) => s.value_at(idx),
+//             Self::Dictionary8(d) => d.value_at(idx),
+//             Self::Dictionary16(d) => d.value_at(idx),
+//         }
+//     }
+// }
+
+impl<'a, T> NullableArrayAccessor for MaybeDictArrayAccessor<'a, T>
+where T: Array + NullableArrayAccessor + 'static {
+    type Native = T::Native;
+
+    fn value_at(&self, idx: usize) -> Option<<MaybeDictArrayAccessor<'a, T> as NullableArrayAccessor>::Native> {
         match self {
             Self::Native(s) => s.value_at(idx),
             Self::Dictionary8(d) => d.value_at(idx),
@@ -245,15 +289,16 @@ where
     }
 }
 
-impl<'a, V> MaybeDictArrayAccessor<'a, PrimitiveArray<V>> where V: ArrowPrimitiveType {
-    pub fn new(arr: &'a ArrayRef) -> error::Result<Self> {
-        if *arr.data_type() == V::DATA_TYPE {
-            return Ok(Self::Native(arr.as_any().downcast_ref::<PrimitiveArray<V>>().unwrap()))
+impl<'a, T> MaybeDictArrayAccessor<'a, T> 
+where T: Array + NullableArrayAccessor + 'static {
+    fn try_new_with_datatype(data_type: DataType, arr: &'a ArrayRef) -> error::Result<Self> {
+        if *arr.data_type() == data_type {
+            return Ok(Self::Native(arr.as_any().downcast_ref::<T>().unwrap()))
         }
 
         if let DataType::Dictionary(key, v) = arr.data_type() {
-            ensure!(**v == V::DATA_TYPE, error::UnsupportedDictionaryValueTypeSnafu {
-                expect: V::DATA_TYPE,
+            ensure!(**v == data_type, error::UnsupportedDictionaryValueTypeSnafu {
+                expect: data_type,
                 actual: (**v).clone()
             });
 
@@ -277,12 +322,68 @@ impl<'a, V> MaybeDictArrayAccessor<'a, PrimitiveArray<V>> where V: ArrowPrimitiv
 
         InvalidListArraySnafu {
             expect_oneof: vec![
-                V::DATA_TYPE,
-                DataType::Dictionary(Box::new(DataType::UInt8), Box::new(V::DATA_TYPE)),
-                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(V::DATA_TYPE))
+                data_type.clone(),
+                DataType::Dictionary(Box::new(DataType::UInt8), Box::new(data_type.clone())),
+                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(data_type.clone()))
             ],
             actual: arr.data_type().clone()
         }.fail()
+    }
+}
+
+impl<'a, V> MaybeDictArrayAccessor<'a, PrimitiveArray<V>> where V: ArrowPrimitiveType {
+    pub fn new(arr: &'a ArrayRef) -> error::Result<Self> {
+        Self::try_new_with_datatype(V::DATA_TYPE, arr)
+    //     if *arr.data_type() == V::DATA_TYPE {
+    //         return Ok(Self::Native(arr.as_any().downcast_ref::<PrimitiveArray<V>>().unwrap()))
+    //     }
+
+    //     if let DataType::Dictionary(key, v) = arr.data_type() {
+    //         ensure!(**v == V::DATA_TYPE, error::UnsupportedDictionaryValueTypeSnafu {
+    //             expect: V::DATA_TYPE,
+    //             actual: (**v).clone()
+    //         });
+
+    //         let result = match **key {
+    //             DataType::UInt8 => Self::Dictionary8(DictionaryArrayAccessor::new(
+    //                 arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>().unwrap()
+    //             )),
+    //             DataType::UInt16 => Self::Dictionary16(DictionaryArrayAccessor::new(
+    //                 arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>().unwrap()
+    //             )),
+    //             _ => {
+    //                 return error::UnsupportedDictionaryKeyTypeSnafu {
+    //                     expect_oneof: vec![DataType::UInt8, DataType::UInt16],
+    //                     actual: (**key).clone(),
+    //                 }.fail()
+    //             }
+    //         };
+
+    //         return Ok(result)
+    //     }
+
+    //     InvalidListArraySnafu {
+    //         expect_oneof: vec![
+    //             V::DATA_TYPE,
+    //             DataType::Dictionary(Box::new(DataType::UInt8), Box::new(V::DATA_TYPE)),
+    //             DataType::Dictionary(Box::new(DataType::UInt16), Box::new(V::DATA_TYPE))
+    //         ],
+    //         actual: arr.data_type().clone()
+    //     }.fail()
+    }
+}
+
+impl<'a> MaybeDictArrayAccessor<'a, BinaryArray> where {
+    pub fn new(arr: &'a ArrayRef) -> error::Result<Self> {
+        // todo!()
+        Self::try_new_with_datatype(BinaryArray::DATA_TYPE, arr)
+    }
+}
+
+impl<'a> MaybeDictArrayAccessor<'a, FixedSizeBinaryArray> {
+    pub fn new(arr: &'a ArrayRef, dims: i32) -> error::Result<Self> {
+        // todo!()
+        Self::try_new_with_datatype(DataType::FixedSizeBinary(dims), arr)
     }
 }
 
@@ -375,8 +476,12 @@ where
     }
 
     pub fn value_at(&self, idx: usize) -> Option<V::Native> {
-        let offset = self.inner.key(idx).unwrap();
-        self.value.value_at(offset)
+        if self.inner.is_valid(idx) {
+            let offset = self.inner.key(idx).unwrap();
+            self.value.value_at(offset)
+        } else {
+            None
+        }
     }
 }
 

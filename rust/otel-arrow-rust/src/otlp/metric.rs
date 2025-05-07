@@ -11,8 +11,7 @@
 // limitations under the License.
 
 use crate::arrays::{
-    NullableArrayAccessor, StringArrayAccessor, get_bool_array_opt, get_i32_array_opt,
-    get_u8_array, get_u16_array,
+    get_bool_array_opt, get_i32_array_opt, get_u16_array, get_u8_array, MaybeDictArrayAccessor, NullableArrayAccessor, StringArrayAccessor
 };
 use crate::error;
 use crate::otlp::related_data::RelatedData;
@@ -108,7 +107,7 @@ impl<'a> TryFrom<&'a RecordBatch> for ResourceArrays<'a> {
 
 struct ScopeArrays<'a> {
     name: Option<StringArrayAccessor<'a>>,
-    version: Option<&'a StringArray>,
+    version: Option<StringArrayAccessor<'a>>,
     dropped_attributes_count: Option<&'a UInt32Array>,
     id: Option<&'a UInt16Array>,
 }
@@ -174,16 +173,18 @@ impl<'a> TryFrom<&'a RecordBatch> for ScopeArrays<'a> {
 
         let version = scope_array
             .column_by_name(consts::VERSION)
-            .map(|a| {
-                a.as_any().downcast_ref::<StringArray>().context(
-                    error::ColumnDataTypeMismatchSnafu {
-                        name: consts::VERSION,
-                        expect: DataType::Utf8,
-                        actual: a.data_type().clone(),
-                    },
-                )
-            })
+            .map(StringArrayAccessor::new)
             .transpose()?;
+            // .map(|a| {
+            //     a.as_any().downcast_ref::<StringArray>().context(
+            //         error::ColumnDataTypeMismatchSnafu {
+            //             name: consts::VERSION,
+            //             expect: DataType::Utf8,
+            //             actual: a.data_type().clone(),
+            //         },
+            //     )
+            // })
+            // .transpose()?;
 
         let dropped_attributes_count = scope_array
             .column_by_name(consts::DROPPED_ATTRIBUTES_COUNT)
@@ -226,8 +227,8 @@ struct MetricsArrays<'a> {
     schema_url: Option<StringArrayAccessor<'a>>,
     name: StringArrayAccessor<'a>,
     description: Option<StringArrayAccessor<'a>>,
-    unit: Option<&'a StringArray>,
-    aggregation_temporality: Option<&'a Int32Array>,
+    unit: Option<StringArrayAccessor<'a>>,
+    aggregation_temporality: Option<MaybeDictArrayAccessor<'a, Int32Array>>,
     is_monotonic: Option<&'a BooleanArray>,
 }
 
@@ -253,17 +254,13 @@ impl<'a> TryFrom<&'a RecordBatch> for MetricsArrays<'a> {
 
         let unit = rb
             .column_by_name(consts::UNIT)
-            .map(|a| {
-                a.as_any().downcast_ref::<StringArray>().with_context(|| {
-                    error::ColumnDataTypeMismatchSnafu {
-                        name: consts::UNIT,
-                        expect: DataType::Utf8,
-                        actual: a.data_type().clone(),
-                    }
-                })
-            })
+            .map(StringArrayAccessor::new)
             .transpose()?;
-        let aggregation_temporality = get_i32_array_opt(rb, consts::AGGREGATION_TEMPORALITY)?;
+        // let aggregation_temporality = get_i32_array_opt(rb, consts::AGGREGATION_TEMPORALITY)?;
+        // let aggregaction_temporality = MaybeDictArrayAccessor::<Int32Array>::new()
+        let aggregation_temporality = rb.column_by_name(consts::AGGREGATION_TEMPORALITY)
+            .map(MaybeDictArrayAccessor::<Int32Array>::new)
+            .transpose()?;
         let is_monotonic = get_bool_array_opt(rb, consts::IS_MONOTONIC)?;
         Ok(Self {
             id,
