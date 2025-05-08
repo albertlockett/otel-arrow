@@ -47,6 +47,7 @@ pub enum MetricType {
 struct MetricsArrays<'a> {
     id: &'a UInt16Array,
     metric_type: &'a UInt8Array,
+    // TODO figure out why these are all optional?
     schema_url: Option<StringArrayAccessor<'a>>,
     name: StringArrayAccessor<'a>,
     description: Option<StringArrayAccessor<'a>>,
