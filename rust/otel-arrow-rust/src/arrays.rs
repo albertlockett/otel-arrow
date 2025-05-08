@@ -139,9 +139,7 @@ macro_rules! impl_downcast {
 
               pub fn [<get_ $suffix _array> ]<'a>(rb: &'a RecordBatch, name: &str) -> error::Result<&'a $array_type> {
                 use arrow::datatypes::DataType::*;
-                let arr = rb.column_by_name(name).context(error::ColumnNotFoundSnafu {
-            name,
-        })?;
+                let arr = get_array(rb, name)?;
 
                  arr.as_any()
                             .downcast_ref::<$array_type>()
@@ -176,6 +174,12 @@ impl_downcast!(
     Timestamp(TimeUnit::Nanosecond, None),
     TimestampNanosecondArray
 );
+
+fn get_array<'a>(record_batch: &'a RecordBatch, column_name: &str) -> error::Result<&'a ArrayRef> {
+    record_batch.column_by_name(column_name).context(error::ColumnNotFoundSnafu {
+        name: column_name,
+    })
+}
 
 trait NullableInt64ArrayAccessor {
     fn i64_at(&self, idx: usize) -> error::Result<Option<i64>>;
@@ -243,6 +247,10 @@ pub enum ByteArrayAccessor<'a> {
 }
 
 impl<'a> ByteArrayAccessor<'a> {
+    pub fn try_new_from_column(record_batch: &'a RecordBatch, column_name: &str) -> error::Result<Self> {
+        Self::try_new(get_array(record_batch, column_name)?)
+    }
+
     pub fn try_new(arr: &'a ArrayRef) -> error::Result<Self> {
         match arr.data_type() {
             DataType::Binary => {
@@ -394,6 +402,10 @@ where
     pub fn try_new(arr: &'a ArrayRef) -> error::Result<Self> {
         Self::try_new_with_datatype(V::DATA_TYPE, arr)
     }
+
+    pub fn try_new_from_column(record_batch: &'a RecordBatch, column_name: &str) -> error::Result<Self> {
+        Self::try_new(get_array(record_batch, column_name)?)
+    }
 }
 
 impl<'a> MaybeDictArrayAccessor<'a, BinaryArray> {
@@ -411,6 +423,10 @@ impl<'a> MaybeDictArrayAccessor<'a, FixedSizeBinaryArray> {
 impl<'a> MaybeDictArrayAccessor<'a, StringArray> {
     pub fn try_new(arr: &'a ArrayRef) -> error::Result<Self> {
         Self::try_new_with_datatype(StringArray::DATA_TYPE, arr)
+    }
+
+    pub fn try_new_from_column(record_batch: &'a RecordBatch, column_name: &str) -> error::Result<Self> {
+        Self::try_new(get_array(record_batch, column_name)?)
     }
 }
 
