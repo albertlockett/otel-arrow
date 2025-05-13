@@ -11,9 +11,8 @@
 // limitations under the License.
 
 use crate::arrays::{
-    ByteArrayAccessor, Int32ArrayAccessor, Int64ArrayAccessor, MaybeDictArrayAccessor,
-    NullableArrayAccessor, StringArrayAccessor, get_bool_array_opt, get_f64_array_opt,
-    get_u8_array,
+    ByteArrayAccessor, Int64ArrayAccessor, MaybeDictArrayAccessor, NullableArrayAccessor,
+    StringArrayAccessor, get_bool_array_opt, get_f64_array_opt, get_u8_array,
 };
 use crate::error;
 use crate::otlp::attributes::parent_id::ParentId;

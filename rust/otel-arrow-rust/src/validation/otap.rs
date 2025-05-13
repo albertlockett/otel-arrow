@@ -14,7 +14,7 @@ use crate::{
             arrow_logs_service_server::{ArrowLogsService, ArrowLogsServiceServer},
             arrow_metrics_service_server::{ArrowMetricsService, ArrowMetricsServiceServer},
         },
-        collector::logs::v1::{ExportLogsServiceRequest, ExportLogsServiceResponse},
+        collector::logs::v1::ExportLogsServiceRequest,
     },
 };
 
