@@ -25,7 +25,7 @@ pub trait ArrayBuilderConstructor {
     fn new() -> Self;
 }
 
-pub struct DictionaryConfig {
+pub struct DictionaryOptions {
     // TODO fill this out
 }
 
@@ -38,7 +38,7 @@ impl<T> DictionaryArrayBuilder<T>
 where
     T: ArrayBuilder + ArrayBuilderConstructor,
 {
-    fn new(config: &DictionaryConfig) -> Self {
+    fn new(options: &DictionaryOptions) -> Self {
         Self {
             values_builder: T::new(),
         }
@@ -82,6 +82,7 @@ where
         match self {
             Self::Dictionary(dict_array_builder) => match dict_array_builder.append_value(value) {
                 Ok(ok) => Ok(ok),
+                // TODO need to use the actual error here
                 Err(crate::error::Error::BuildStreamReader {
                     source: _,
                     location: _,
@@ -103,39 +104,37 @@ where
 }
 
 #[derive(Default)]
-pub struct DynamicArrayBuilderConfig {
-    pub dictionary_config: Option<DictionaryConfig>,
+pub struct AdaptiveArrayOptions {
+    pub dictionary_options: Option<DictionaryOptions>,
     pub nullable: bool,
 }
 
-pub struct DynamicArrayBuilder<T: ArrayBuilder + ArrayBuilderConstructor> {
-    dictionary_config: Option<DictionaryConfig>,
+pub struct AdaptiveArrayBuilder<T: ArrayBuilder + ArrayBuilderConstructor> {
+    dictionary_options: Option<DictionaryOptions>,
     inner: Option<MaybeDictionaryBuilder<T>>,
 }
 
-impl<T> DynamicArrayBuilder<T>
+impl<T> AdaptiveArrayBuilder<T>
 where
     T: ArrayBuilder + ArrayBuilderConstructor,
 {
-    pub fn new(config: DynamicArrayBuilderConfig) -> Self {
+    pub fn new(options: AdaptiveArrayOptions) -> Self {
         todo!();
     }
 }
 
-impl<T> ArrayBuilder for DynamicArrayBuilder<T>
+impl<T> ArrayBuilder for AdaptiveArrayBuilder<T>
 where
     T: ArrayBuilder + ArrayBuilderConstructor,
 {
     type Native = T::Native;
 
     fn append_value(&mut self, value: &Self::Native) -> Result<()> {
-        // TODO should this be implemented on the enum instead?
-
         // TODO comment
         if self.inner.is_none() {
-            self.inner = match self.dictionary_config.as_ref() {
-                Some(dictionary_config) => Some(MaybeDictionaryBuilder::Dictionary(
-                    DictionaryArrayBuilder::new(dictionary_config),
+            self.inner = match self.dictionary_options.as_ref() {
+                Some(dictionary_options) => Some(MaybeDictionaryBuilder::Dictionary(
+                    DictionaryArrayBuilder::new(dictionary_options),
                 )),
                 None => Some(MaybeDictionaryBuilder::Native(T::new())),
             };

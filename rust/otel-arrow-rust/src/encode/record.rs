@@ -20,12 +20,12 @@ mod test {
     use arrow::datatypes::{DataType, Field, Schema};
 
     use super::array::string::StringArrayBuilder;
-    use super::array::{ArrayBuilder, DynamicArrayBuilder, DynamicArrayBuilderConfig};
+    use super::array::{AdaptiveArrayBuilder, AdaptiveArrayOptions, ArrayBuilder};
 
     fn smoke_test() {
         let mut string_builder =
-            DynamicArrayBuilder::<StringArrayBuilder>::new(DynamicArrayBuilderConfig::default());
-        string_builder.append_value(&"fuck".to_string()).unwrap();
+            AdaptiveArrayBuilder::<StringArrayBuilder>::new(AdaptiveArrayOptions::default());
+        string_builder.append_value(&"test".to_string()).unwrap();
 
         let strings = string_builder.finish();
 
