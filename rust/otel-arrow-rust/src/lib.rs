@@ -18,6 +18,7 @@
 #[allow(dead_code)]
 pub(crate) mod arrays;
 mod decode;
+mod encode;
 mod error;
 mod otlp;
 #[allow(dead_code)]
