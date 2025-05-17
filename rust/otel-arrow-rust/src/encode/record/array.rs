@@ -69,6 +69,39 @@ enum MaybeDictionaryBuilder<T: ArrayBuilder + ArrayBuilderConstructor> {
     Dictionary(DictionaryArrayBuilder<T>),
 }
 
+impl<T> ArrayBuilder for MaybeDictionaryBuilder<T>
+where
+    T: ArrayBuilder + ArrayBuilderConstructor,
+{
+    type Native = T::Native;
+
+    fn append_value(
+        &mut self,
+        value: &<MaybeDictionaryBuilder<T> as ArrayBuilder>::Native,
+    ) -> Result<()> {
+        match self {
+            Self::Dictionary(dict_array_builder) => match dict_array_builder.append_value(value) {
+                Ok(ok) => Ok(ok),
+                Err(crate::error::Error::BuildStreamReader {
+                    source: _,
+                    location: _,
+                }) => {
+                    let mut native = T::new();
+                    native.append_value(value)?;
+                    *self = Self::Native(native);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+            Self::Native(array_builder) => array_builder.append_value(value),
+        }
+    }
+
+    fn finish(self) -> ArrayWithType {
+        todo!()
+    }
+}
+
 #[derive(Default)]
 pub struct DynamicArrayBuilderConfig {
     pub dictionary_config: Option<DictionaryConfig>,
@@ -109,26 +142,11 @@ where
         }
 
         // TODO comment
-        match self.inner.as_mut() {
-            Some(MaybeDictionaryBuilder::Dictionary(dict_array_builder)) => {
-                match dict_array_builder.append_value(value) {
-                    Ok(()) => Ok(()),
-                    Err(crate::error::Error::EmptyBatch { location: _ }) => {
-                        let mut native = T::new();
-                        native.append_value(value)?;
-                        self.inner = Some(MaybeDictionaryBuilder::Native(native));
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            Some(MaybeDictionaryBuilder::Native(array_builder)) => {
-                array_builder.append_value(value)
-            }
-            None => {
-                unreachable!("inner builder should be ")
-            }
-        }
+        let inner = self
+            .inner
+            .as_mut()
+            .expect("inner should now be initialized");
+        inner.append_value(value)
     }
 
     fn finish(self) -> ArrayWithType {
