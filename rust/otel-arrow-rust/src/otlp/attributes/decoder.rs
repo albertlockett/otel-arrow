@@ -109,7 +109,7 @@ where
 /// This returns a new RecordBatch with the parent_id column replaced with the materialized id.
 ///
 #[allow(unused)] // TODO -- remove allow(unused) when we use this to optimize decoding OTAP
-pub fn materialize_parent_id<T>(record_batch: &RecordBatch) -> Result<RecordBatch>
+pub async fn materialize_parent_id<T>(record_batch: &RecordBatch) -> Result<RecordBatch>
 where
     T: ParentId,
     <T as ParentId>::ArrayType: ArrowPrimitiveType,
@@ -321,8 +321,8 @@ mod test {
     use arrow::datatypes::{ArrowDictionaryKeyType, DataType, Field, Schema, UInt16Type};
     use std::sync::Arc;
 
-    #[test]
-    fn test_materialize_parent_id_val_change() {
+    #[tokio::test]
+    async fn test_materialize_parent_id_val_change() {
         let test_data = [
             // (key, str_val, int_val, parent_id, expected)
             ("attr1", Some("a"), None, 1, 1), //
@@ -371,14 +371,14 @@ mod test {
         )
         .unwrap();
 
-        let result_batch = materialize_parent_id::<u16>(&record_batch).unwrap();
+        let result_batch = materialize_parent_id::<u16>(&record_batch).await.unwrap();
         let parent_ids = get_u16_array(&result_batch, consts::PARENT_ID).unwrap();
         let expected = UInt16Array::from_iter_values(test_data.iter().map(|a| a.4));
         assert_eq!(parent_ids, &expected)
     }
 
-    #[test]
-    fn test_materialize_parent_id_with_nulls() {
+    #[tokio::test]
+    async fn test_materialize_parent_id_with_nulls() {
         let test_data = [
             // (key, string_val, parent id, expected parent id)
             ("attr1", Some("a"), 1, 1),
@@ -412,14 +412,14 @@ mod test {
         )
         .unwrap();
 
-        let result_batch = materialize_parent_id::<u16>(&record_batch).unwrap();
+        let result_batch = materialize_parent_id::<u16>(&record_batch).await.unwrap();
         let parent_ids = get_u16_array(&result_batch, consts::PARENT_ID).unwrap();
         let expected = UInt16Array::from_iter_values(test_data.iter().map(|a| a.3));
         assert_eq!(parent_ids, &expected)
     }
 
-    #[test]
-    fn test_materialize_parent_id_empty() {
+    #[tokio::test]
+    async fn test_materialize_parent_id_empty() {
         // test this special case of empty batch
 
         let record_batch = RecordBatch::try_new(
@@ -438,16 +438,16 @@ mod test {
         )
         .unwrap();
 
-        let result_batch = materialize_parent_id::<u16>(&record_batch).unwrap();
+        let result_batch = materialize_parent_id::<u16>(&record_batch).await.unwrap();
         let parent_ids = get_u16_array(&result_batch, consts::PARENT_ID).unwrap();
         let expected = UInt16Array::from_iter_values(vec![]);
         assert_eq!(parent_ids, &expected)
     }
 
     // test that the materialize_parent_id
-    #[test]
-    fn test_materialize_parent_id_dicts_values() {
-        fn run_test_with_dict_key_type<K>()
+    #[tokio::test]
+    async fn test_materialize_parent_id_dicts_values() {
+        async fn run_test_with_dict_key_type<K>()
         where
             K: ArrowDictionaryKeyType,
             K::Native: TryFrom<u8>,
@@ -496,18 +496,18 @@ mod test {
             )
             .unwrap();
 
-            let result_batch = materialize_parent_id::<u16>(&record_batch).unwrap();
+            let result_batch = materialize_parent_id::<u16>(&record_batch).await.unwrap();
             let parent_ids = get_u16_array(&result_batch, consts::PARENT_ID).unwrap();
             let expected = UInt16Array::from_iter_values(test_data.iter().map(|a| a.3));
             assert_eq!(parent_ids, &expected)
         }
 
-        run_test_with_dict_key_type::<UInt8Type>();
-        run_test_with_dict_key_type::<UInt16Type>();
+        run_test_with_dict_key_type::<UInt8Type>().await;
+        run_test_with_dict_key_type::<UInt16Type>().await;
     }
 
-    #[test]
-    fn test_materialize_parent_ids_other_values_types() {
+    #[tokio::test]
+    async fn test_materialize_parent_ids_other_values_types() {
         let test_data = [
             ("attr1", AttributeValueType::Double, 1, 1),
             ("attr1", AttributeValueType::Double, 1, 2), // delta = 1
@@ -601,7 +601,7 @@ mod test {
         )
         .unwrap();
 
-        let result_batch = materialize_parent_id::<u16>(&record_batch).unwrap();
+        let result_batch = materialize_parent_id::<u16>(&record_batch).await.unwrap();
         let parent_ids = get_u16_array(&result_batch, consts::PARENT_ID).unwrap();
         let expected = UInt16Array::from_iter_values(test_data.iter().map(|a| a.3));
         assert_eq!(parent_ids, &expected)
