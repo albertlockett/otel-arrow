@@ -233,7 +233,7 @@ pub fn logs_from(mut logs_otap_batch: OtapBatch) -> Result<ExportLogsServiceRequ
                     .as_mut()
                     .and_then(|store| store.attribute_by_delta_id(res_id))
                 {
-                    resource.attributes = attrs.to_vec();
+                    resource.attributes = attrs.collect();
                 }
             }
 
@@ -252,7 +252,7 @@ pub fn logs_from(mut logs_otap_batch: OtapBatch) -> Result<ExportLogsServiceRequ
                     .as_mut()
                     .and_then(|store| store.attribute_by_delta_id(scope_id))
                 {
-                    scope.attributes = attrs.to_vec();
+                    scope.attributes = attrs.collect();
                 }
             }
 
@@ -321,7 +321,7 @@ pub fn logs_from(mut logs_otap_batch: OtapBatch) -> Result<ExportLogsServiceRequ
             .as_mut()
             .and_then(|store| store.attribute_by_delta_id(delta_id))
         {
-            current_log_record.attributes = attrs.to_vec()
+            current_log_record.attributes = attrs.collect()
         }
     }
 
