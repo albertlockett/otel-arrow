@@ -11,10 +11,14 @@ use std::sync::Arc;
 use arrow::{
     array::{AnyDictionaryArray, Array, ArrayRef, ArrowPrimitiveType, DictionaryArray},
     datatypes::{ArrowDictionaryKeyType, DataType, UInt8Type, UInt16Type},
+    error::ArrowError,
 };
 use snafu::Snafu;
 
-use crate::arrays::NullableArrayAccessor;
+use crate::{
+    arrays::NullableArrayAccessor,
+    encode::record::array::{ArrayAppend, CheckedArrayAppend},
+};
 
 use super::{ArrayBuilder, ArrayBuilderConstructor};
 
@@ -27,9 +31,29 @@ pub enum DictionaryBuilderError {
 
 pub type Result<T> = std::result::Result<T, DictionaryBuilderError>;
 
+// TODO comment about what is happening here ...
+pub mod checked {
+    use super::*;
+
+    #[derive(Snafu, Debug)]
+    #[snafu(visibility(pub))]
+    pub enum DictionaryBuilderError {
+        #[snafu(display("dict overflow"))]
+        DictOverflow {},
+
+        #[snafu(display("checked builder error"))]
+        CheckedBuilderError {
+            #[snafu(source)]
+            source: ArrowError,
+        },
+    }
+
+    pub type Result<T> = std::result::Result<T, DictionaryBuilderError>;
+}
+
 // This is the base trait for array builder implementations that are
 // used to construct dictionary arrays
-pub trait DictionaryArrayBuilder<T>
+pub trait DictionaryArrayAppend<T>
 where
     T: ArrowDictionaryKeyType,
 {
@@ -42,26 +66,41 @@ where
     // If the implementing builder can determine internally that the dictionary
     // would overflow, it can also return `DictOverflow` error
     fn append_value(&mut self, value: &Self::Native) -> Result<usize>;
-
-    fn finish(&mut self) -> DictionaryArrayWithType<T>;
 }
 
-pub struct DictionaryArrayWithType<T>
+pub trait CheckedDictionaryArrayAppend<T>
 where
     T: ArrowDictionaryKeyType,
 {
-    pub array: Arc<DictionaryArray<T>>,
-    pub data_type: DataType,
+    type Native;
+
+    fn append_value(&mut self, value: &Self::Native) -> checked::Result<usize>;
 }
 
-impl<T> From<DictionaryArrayWithType<T>> for super::ArrayWithType
+pub trait DictionaryBuilder<K>
+where
+    K: ArrowDictionaryKeyType,
+{
+    fn finish(&mut self) -> DictionaryArray<K>;
+}
+
+// pub struct DictionaryArrayWithType<T>
+// where
+//     T: ArrowDictionaryKeyType,
+// {
+//     pub array: Arc<DictionaryArray<T>>,
+//     pub data_type: DataType,
+// }
+
+impl<T> From<DictionaryArray<T>> for super::ArrayWithType
 where
     T: ArrowDictionaryKeyType,
 {
-    fn from(value: DictionaryArrayWithType<T>) -> Self {
+    fn from(value: DictionaryArray<T>) -> Self {
+        let data_type = value.data_type().clone();
         super::ArrayWithType {
-            array: value.array,
-            data_type: value.data_type,
+            array: Arc::new(value),
+            data_type,
         }
     }
 }
@@ -106,18 +145,18 @@ pub struct AdaptiveDictionaryBuilder<T8, T16> {
     overflow_index: Option<usize>,
 }
 
-impl<T8, T16> AdaptiveDictionaryBuilder<T8, T16>
+impl<T, T8, T16> AdaptiveDictionaryBuilder<T8, T16>
 where
-    T8: ArrayBuilderConstructor + UpdateDictionaryIndexInto<T16>,
-    T16: ArrayBuilderConstructor,
+    T8: ArrayBuilderConstructor<Args = T>,
+    T16: ArrayBuilderConstructor<Args = T>,
 {
-    pub fn new(options: &DictionaryOptions) -> Self {
+    pub fn new(options: &DictionaryOptions, constructor_args: T) -> Self {
         // choose the default dictionary index type to be the smallest that can
         // hold the min cardinality
         let variant = if options.min_cardinality <= u8::MAX.into() {
-            DictIndexVariant::UInt8(T8::new())
+            DictIndexVariant::UInt8(T8::new(constructor_args))
         } else {
-            DictIndexVariant::UInt16(T16::new())
+            DictIndexVariant::UInt16(T16::new(constructor_args))
         };
 
         Self {
@@ -126,7 +165,13 @@ where
             overflow_index: None,
         }
     }
+}
 
+impl<T8, T16> AdaptiveDictionaryBuilder<T8, T16>
+where
+    T8: UpdateDictionaryIndexInto<T16>,
+    T16: ArrayBuilderConstructor,
+{
     fn upgrade_key(&mut self) -> Result<()> {
         match &mut self.variant {
             DictIndexVariant::UInt8(dict_builder) => {
@@ -148,34 +193,64 @@ where
 
 impl<T, T8, T16> AdaptiveDictionaryBuilder<T8, T16>
 where
-    T8: DictionaryArrayBuilder<UInt8Type, Native = T> + ConvertToNativeHelper,
+    T8: DictionaryBuilder<UInt8Type> + ConvertToNativeHelper,
     <T8 as ConvertToNativeHelper>::Accessor: NullableArrayAccessor<Native = T> + 'static,
-    T16: DictionaryArrayBuilder<UInt16Type, Native = T> + ConvertToNativeHelper,
+    T16: DictionaryBuilder<UInt16Type> + ConvertToNativeHelper,
     <T16 as ConvertToNativeHelper>::Accessor: NullableArrayAccessor<Native = T> + 'static,
 {
     pub fn to_native<TN>(&mut self, builder: &mut TN)
     where
-        TN: ArrayBuilder<Native = T>,
+        TN: ArrayAppend<Native = T>,
+    {
+        // safety: we're OK to call expect() here because UncheckedArrayAdapter will never return Error
+        // which means populate_native_builder will also not return an error
+        self.to_native_checked(&mut UncheckedArrayBuilderAdapter { inner: builder })
+            .expect("can convert to native");
+    }
+
+    pub fn to_native_checked<TN>(&mut self, builder: &mut TN) -> std::result::Result<(), ArrowError>
+    where
+        TN: CheckedArrayAppend<Native = T>,
     {
         match &mut self.variant {
             DictIndexVariant::UInt8(dict_builder) => {
                 let result = dict_builder.finish();
                 populate_native_builder::<_, UInt8Type, <T8 as ConvertToNativeHelper>::Accessor, _>(
-                    &result.array,
+                    &result,
                     builder,
                     self.overflow_index,
-                );
+                )
             }
 
             DictIndexVariant::UInt16(dict_builder) => {
                 let result = dict_builder.finish();
                 populate_native_builder::<_, UInt16Type, <T16 as ConvertToNativeHelper>::Accessor, _>(
-                    &result.array,
+                    &result,
                     builder,
                     self.overflow_index,
-                );
+                )
             }
         }
+    }
+}
+
+/// TODO -- comment on what this is doing & why we have it
+struct UncheckedArrayBuilderAdapter<'a, T>
+where
+    T: ArrayAppend,
+{
+    inner: &'a mut T,
+}
+
+impl<'a, T> CheckedArrayAppend for UncheckedArrayBuilderAdapter<'a, T>
+where
+    T: ArrayAppend,
+{
+    type Native = T::Native;
+
+    fn append_value(&mut self, value: &Self::Native) -> std::result::Result<(), ArrowError> {
+        self.inner.append_value(value);
+        Ok(())
     }
 }
 
@@ -185,8 +260,11 @@ fn populate_native_builder<T, K, V, TN>(
     dict_arr: &DictionaryArray<K>,
     builder: &mut TN,
     overflow_index: Option<usize>,
-) where
-    TN: ArrayBuilder<Native = T>,
+    // TODO don't like how have to call this out as std::result::Result?
+    // maybe could avoid aliasing the result in this package instead
+) -> std::result::Result<(), ArrowError>
+where
+    TN: CheckedArrayAppend<Native = T>,
     K: ArrowDictionaryKeyType,
     <K as ArrowPrimitiveType>::Native: Into<usize>,
     V: NullableArrayAccessor<Native = T> + 'static,
@@ -217,16 +295,16 @@ fn populate_native_builder<T, K, V, TN>(
         let value = values
             .value_at(index)
             .expect("expect index in dict values array to be valid");
-        builder.append_value(&value);
+        builder.append_value(&value)?;
     }
+
+    Ok(())
 }
 
 impl<T, T8, T16> AdaptiveDictionaryBuilder<T8, T16>
 where
-    T8: DictionaryArrayBuilder<UInt8Type, Native = T>
-        + ArrayBuilderConstructor
-        + UpdateDictionaryIndexInto<T16>,
-    T16: DictionaryArrayBuilder<UInt16Type, Native = T> + ArrayBuilderConstructor,
+    T8: DictionaryArrayAppend<UInt8Type, Native = T> + UpdateDictionaryIndexInto<T16>,
+    T16: DictionaryArrayAppend<UInt16Type, Native = T> + ArrayBuilderConstructor,
 {
     pub fn append_value(&mut self, value: &T) -> Result<usize> {
         let append_result = match &mut self.variant {
@@ -251,7 +329,50 @@ where
             }
         }
     }
+}
 
+impl<T, T8, T16> AdaptiveDictionaryBuilder<T8, T16>
+where
+    T8: CheckedDictionaryArrayAppend<UInt8Type, Native = T> + UpdateDictionaryIndexInto<T16>,
+    T16: CheckedDictionaryArrayAppend<UInt16Type, Native = T> + ArrayBuilderConstructor,
+{
+    pub fn append_value_checked(&mut self, value: &T) -> checked::Result<usize> {
+        let append_result = match &mut self.variant {
+            DictIndexVariant::UInt8(dict_builder) => dict_builder.append_value(value),
+            DictIndexVariant::UInt16(dict_builder) => dict_builder.append_value(value),
+        };
+
+        match append_result {
+            Ok(index) => {
+                if index + 1 > self.max_cardinality as usize {
+                    // if we're here, it means we did append successfully to the underlying builder
+                    // but we shouldn't have, because have overflowed the configured max cardinality
+                    self.overflow_index = Some(index);
+                    Err(checked::DictionaryBuilderError::DictOverflow {})
+                } else {
+                    Ok(index)
+                }
+            }
+            Err(checked::DictionaryBuilderError::DictOverflow {}) => {
+                self.upgrade_key().map_err(|err| match err {
+                    DictionaryBuilderError::DictOverflow {} => {
+                        checked::DictionaryBuilderError::DictOverflow {}
+                    }
+                })?;
+                self.append_value_checked(value)
+            }
+
+            // return other types of errors to caller
+            e => return e,
+        }
+    }
+}
+
+impl<T8, T16> AdaptiveDictionaryBuilder<T8, T16>
+where
+    T8: DictionaryBuilder<UInt8Type>,
+    T16: DictionaryBuilder<UInt16Type>,
+{
     pub fn finish(&mut self) -> super::ArrayWithType {
         match &mut self.variant {
             DictIndexVariant::UInt8(u8_dict_builder) => u8_dict_builder.finish().into(),
@@ -279,10 +400,13 @@ mod test {
 
     #[test]
     fn test_dict_builder() {
-        let mut dict_builder = TestDictBuilder::new(&DictionaryOptions {
-            max_cardinality: u16::MAX,
-            min_cardinality: u8::MAX.into(),
-        });
+        let mut dict_builder = TestDictBuilder::new(
+            &DictionaryOptions {
+                max_cardinality: u16::MAX,
+                min_cardinality: u8::MAX.into(),
+            },
+            (),
+        );
 
         let index = dict_builder.append_value(&"a".to_string()).unwrap();
         assert_eq!(index, 0);
@@ -317,10 +441,13 @@ mod test {
 
     #[test]
     fn test_dict_builder_update_index_type() {
-        let mut dict_builder = TestDictBuilder::new(&DictionaryOptions {
-            max_cardinality: u16::MAX,
-            min_cardinality: u8::MAX.into(),
-        });
+        let mut dict_builder = TestDictBuilder::new(
+            &DictionaryOptions {
+                max_cardinality: u16::MAX,
+                min_cardinality: u8::MAX.into(),
+            },
+            Default::default(),
+        );
 
         for i in 0..257 {
             let _ = dict_builder.append_value(&i.to_string()).unwrap();
@@ -343,10 +470,13 @@ mod test {
 
     #[test]
     fn test_dict_max_cardinality() {
-        let mut dict_builder = TestDictBuilder::new(&DictionaryOptions {
-            max_cardinality: u8::MAX as u16 + 1,
-            min_cardinality: u8::MAX as u16 + 1,
-        });
+        let mut dict_builder = TestDictBuilder::new(
+            &DictionaryOptions {
+                max_cardinality: u8::MAX as u16 + 1,
+                min_cardinality: u8::MAX as u16 + 1,
+            },
+            Default::default(),
+        );
 
         for i in 0..u8::MAX {
             let _ = dict_builder.append_value(&i.to_string()).unwrap();
@@ -371,10 +501,13 @@ mod test {
     fn test_dict_min_cardinality() {
         // test that we can force the dictionary index to be bigger type than is needed
         // by specifying the min cardinality.
-        let mut dict_builder = TestDictBuilder::new(&DictionaryOptions {
-            max_cardinality: u16::MAX,
-            min_cardinality: u16::MAX,
-        });
+        let mut dict_builder = TestDictBuilder::new(
+            &DictionaryOptions {
+                max_cardinality: u16::MAX,
+                min_cardinality: u16::MAX,
+            },
+            Default::default(),
+        );
 
         let _ = dict_builder.append_value(&"a".to_string()).unwrap();
         let _ = dict_builder.append_value(&"a".to_string()).unwrap();
@@ -408,10 +541,13 @@ mod test {
     fn test_dict_arbitrary_max_cardinality() {
         // check that we support a max-cardinality that is arbitrarily aligned
         // e.g. not necessarily alighed to u8/u16 max values
-        let mut dict_builder = TestDictBuilder::new(&DictionaryOptions {
-            max_cardinality: 4,
-            min_cardinality: 4,
-        });
+        let mut dict_builder = TestDictBuilder::new(
+            &DictionaryOptions {
+                max_cardinality: 4,
+                min_cardinality: 4,
+            },
+            Default::default(),
+        );
 
         let _ = dict_builder.append_value(&"a".to_string()).unwrap();
         let _ = dict_builder.append_value(&"b".to_string()).unwrap();
