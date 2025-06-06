@@ -87,78 +87,6 @@ enum MaybeDictionaryBuilder<NativeBuilder, DictBuilderU8, DictBuilderU16> {
     Dictionary(AdaptiveDictionaryBuilder<DictBuilderU8, DictBuilderU16>),
 }
 
-// impl<T, TN, TD8, TD16> ArrayAppend for MaybeDictionaryBuilder<TN, TD8, TD16>
-// where
-//     TN: ArrayAppend<Native = T> + ArrayBuilderConstructor,
-//     TD8: DictionaryArrayBuilder<UInt8Type, Native = T>
-//         + ArrayBuilderConstructor
-//         + ConvertToNativeHelper,
-//     <TD8 as ConvertToNativeHelper>::Accessor: NullableArrayAccessor<Native = T> + 'static,
-//     TD16: DictionaryArrayBuilder<UInt16Type, Native = T>
-//         + ArrayBuilderConstructor
-//         + ConvertToNativeHelper,
-//     <TD16 as ConvertToNativeHelper>::Accessor: NullableArrayAccessor<Native = T> + 'static,
-//     TD8: UpdateDictionaryIndexInto<TD16>,
-// {
-//     type Native = T;
-
-//     fn append_value(
-//         &mut self,
-//         value: &<MaybeDictionaryBuilder<TN, TD8, TD16> as ArrayAppend>::Native,
-//     ) {
-//         match self {
-//             Self::Native(array_builder) => array_builder.append_value(value),
-//             Self::Dictionary(dict_array_builder) => match dict_array_builder.append_value(value) {
-//                 // we've overflowed the dictionary, so we must convert to the native builder type
-//                 Err(DictionaryBuilderError::DictOverflow {}) => {
-//                     let mut native = TN::new();
-//                     dict_array_builder.to_native(&mut native);
-//                     native.append_value(value);
-//                     *self = Self::Native(native);
-//                 }
-//                 _ => {
-//                     // do nothing here, as the append was successful
-//                 }
-//             },
-//         }
-//     }
-// }
-
-// impl<T, TN, TD8, TD16> CheckedArrayAppend for MaybeDictionaryBuilder<TN, TD8, TD16>
-// where
-//     TN: CheckedArrayAppend<Native = T> + ArrayBuilderConstructor,
-//     TD8: DictionaryArrayBuilder<UInt8Type, Native = T>
-//         + ArrayBuilderConstructor
-//         + ConvertToNativeHelper,
-//     <TD8 as ConvertToNativeHelper>::Accessor: NullableArrayAccessor<Native = T> + 'static,
-//     TD16: DictionaryArrayBuilder<UInt16Type, Native = T>
-//         + ArrayBuilderConstructor
-//         + ConvertToNativeHelper,
-//     <TD16 as ConvertToNativeHelper>::Accessor: NullableArrayAccessor<Native = T> + 'static,
-//     TD8: UpdateDictionaryIndexInto<TD16>,
-// {
-//     type Native = T;
-
-//     fn append_value_checked(
-//         &mut self,
-//         value: &<MaybeDictionaryBuilder<TN, TD8, TD16> as CheckedArrayAppend>::Native,
-//     ) -> Result<(), ArrowError> {
-//         match self {
-//             Self::Native(array_builder) => array_builder.append_value_checked(value),
-//             Self::Dictionary(dict_array_builder) => match dict_array_builder.append_value(value) {
-//                 // we've overflowed the dictionary, so we must convert to the native builder type
-//                 Err(DictionaryBuilderError::DictOverflow {}) => {
-//                     let mut native = TN::new();
-//                     dict_array_builder.to_native_checked(&mut native);
-//                     *self = Self::Native(native);
-//                     self.append_value_checked(value)
-//                 }
-//                 _ => Ok(()),
-//             },
-//         }
-//     }
-// }
-
 impl<TN, TD8, TD16> ArrayBuilder for MaybeDictionaryBuilder<TN, TD8, TD16>
 where
     TN: ArrayBuilder,
@@ -349,6 +277,7 @@ where
 }
 
 // arg type for noargs constructor
+// TODO -- use this in the implementations of traits that have this arg type
 type NoArgs = ();
 
 pub type StringArrayBuilder = AdaptiveArrayBuilder<

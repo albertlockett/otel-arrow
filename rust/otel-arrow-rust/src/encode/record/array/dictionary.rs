@@ -111,6 +111,8 @@ where
 // implementations of `DictionaryArrayBuilder` have a way to signal to
 // `AdaptiveDictionaryBuilder` what is the underlying type of the values array.
 pub trait ConvertToNativeHelper {
+    // TODO we could add a trait restriction here that is: NullableArrayAccessor<T> + 'static
+    // it might simplify some of the other places this trait is used in generic restrictions
     type Accessor;
 }
 
