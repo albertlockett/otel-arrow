@@ -27,7 +27,7 @@ use arrow::error::ArrowError;
 
 use crate::arrays::NullableArrayAccessor;
 use crate::encode::record::array::dictionary::DictionaryBuilder;
-use crate::pdata::U64Visitor;
+use crate::pdata::{I32Visitor, I64Visitor, StringVisitor, U64Visitor};
 
 use dictionary::{
     AdaptiveDictionaryBuilder, CheckedDictionaryArrayAppend, ConvertToNativeHelper,
@@ -391,6 +391,32 @@ pub type Int32ArrayBuilder = PrimitiveArrayBuilder<Int32Type>;
 pub type Int64ArrayBuilder = PrimitiveArrayBuilder<Int64Type>;
 pub type TimestampNanosecondArrayBuilder = PrimitiveArrayBuilder<TimestampNanosecondType>;
 pub type DurationNanosecondArrayBuilder = PrimitiveArrayBuilder<DurationNanosecondType>;
+
+// TODO - should I be able to implement this for StringArrayBuilder instead of for the mut ref?
+impl<Argument> StringVisitor<Argument> for &mut StringArrayBuilder {
+    fn visit_string(&mut self, arg: Argument, value: &str) -> Argument {
+        // TODO -- need to add an append_str method to handle this to avoid
+        // the copy
+        self.append_value(&value.to_string());
+        arg
+    }
+}
+
+// TODO for these primitive types, this could be a blanket implementation
+
+impl<Argument> I32Visitor<Argument> for &mut Int32ArrayBuilder {
+    fn visit_i32(&mut self, arg: Argument, value: i32) -> Argument {
+        self.append_value(&value);
+        arg
+    }
+}
+
+impl<Argument> I64Visitor<Argument> for &mut Int64ArrayBuilder {
+    fn visit_i64(&mut self, arg: Argument, value: i64) -> Argument {
+        self.append_value(&value);
+        arg
+    }
+}
 
 impl<Argument> U64Visitor<Argument> for &mut TimestampNanosecondArrayBuilder {
     fn visit_u64(&mut self, arg: Argument, value: u64) -> Argument {

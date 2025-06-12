@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanBuilder};
 
+use crate::pdata::BooleanVisitor;
+
 /// `AdaptiveBooleanArray` builder an adaptive array builder that can be either all null, in which case
 /// the finish function won't construct an array (will return None), otherwise it will create the array.
 ///
@@ -60,7 +62,7 @@ impl AdaptiveBooleanArrayBuilder {
     }
 
     /// Append a null value to the builder
-    fn append_null(&mut self) {
+    pub fn append_null(&mut self) {
         match self.inner.as_mut() {
             Some(builder) => builder.append_null(),
             None => self.nulls_prefix += 1,
@@ -79,6 +81,13 @@ impl AdaptiveBooleanArrayBuilder {
         self.inner
             .as_mut()
             .map(|inner| Arc::new(inner.finish()) as ArrayRef)
+    }
+}
+
+impl<Argument> BooleanVisitor<Argument> for &mut AdaptiveBooleanArrayBuilder {
+    fn visit_bool(&mut self, arg: Argument, value: bool) -> Argument {
+        self.append_value(value);
+        arg
     }
 }
 
