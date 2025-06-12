@@ -18,13 +18,12 @@ as bytes. It does this by implementing a Visitor pattern, in which:
 - Every OTLP message object has a corresponding Visitor trait, which is how
   to apply custom logic to OTLP-like data.
 - Every OTLP message object has also:
-  - MessageAdapter: a Visitable impl for OTLP message objects
   - NoopVisitor: a do-nothing Visitor implements all traits
   - Builder: a builder pattern for defning test OTLP message objects,
     along with a new() method covering obligatory fields.
   - EncodedLen: a Visitor for computing the sizes of an OTLP object
-    to an intermediate Vec<usize>, uses Accumulator, has test-only
-    pdata_size() implementation.
+    to an intermediate `Vec<usize>`, uses Accumulator, has test-only
+    `pdata_size()` implementation.
   - Accumulator: an impl for summing the encoded size of the children
     of an OTLP message.
 
@@ -87,47 +86,18 @@ Derive rules on the `TracesData` message object derive the following code.
                         arg
                     }
                 }
-                /// Message adapter for presenting OTLP message objects as visitable.
-                pub struct TracesDataMessageAdapter<'a> {
-                    data: &'a TracesData,
-                }
-                impl<'a> TracesDataMessageAdapter<'a> {
-                    /// Create a new message adapter
-                    pub fn new(data: &'a TracesData) -> Self {
-                        Self { data }
-                    }
-                }
-                impl<'a, Argument> TracesDataVisitable<Argument>
-                for &TracesDataMessageAdapter<'a> {
-                    /// Visits a field of the associated type, passing child-visitors for the traversal.
-                    fn accept_traces_data(
-                        &mut self,
-                        mut arg: Argument,
-                        mut resource_spans_visitor: impl ResourceSpansVisitor<Argument>,
-                    ) -> Argument {
-                        for item in &self.data.resource_spans {
-                            arg = resource_spans_visitor
-                                .visit_resource_spans(
-                                    arg,
-                                    &(ResourceSpansMessageAdapter::new(item)),
-                                );
-                        }
-                        arg
-                    }
-                }
                 /// EncodedLen visitor for calculating protobuf encoded size
-                pub struct TracesDataEncodedLen {
-                    /// Protocol buffer tag number for this message
-                    pub tag: u32,
-                }
-                impl TracesDataEncodedLen {
-                    /// Create a new EncodedLen visitor with the specified tag
-                    pub fn new(tag: u32) -> Self {
-                        Self { tag }
+                pub struct TracesDataEncodedLen<const TAG: u32, const OPTION: bool> {}
+                impl<
+                    const TAG: u32,
+                    const OPTION: bool,
+                > TracesDataEncodedLen<TAG, OPTION> {
+                    /// Create a new EncodedLen visitor.
+                    pub fn new() -> Self {
+                        Self {}
                     }
                     /// Calculate the sum of direct children's encoded lengths.
-                    /// This method processes each child field individually using the visitor pattern.
-                    fn children_encoded_size(
+                    fn visit_children(
                         &mut self,
                         mut arg: crate::pdata::otlp::PrecomputedSizes,
                         mut v: impl TracesDataVisitable<
@@ -135,16 +105,20 @@ Derive rules on the `TracesData` message object derive the following code.
                         >,
                     ) -> (crate::pdata::otlp::PrecomputedSizes, usize) {
                         let mut total = 0;
-                        let mut resource_spans = crate::pdata::otlp::Accumulate::new(
-                            ResourceSpansEncodedLen::new(1u32),
-                        );
+                        let mut resource_spans = crate::pdata::otlp::Accumulate::new(ResourceSpansEncodedLen::<
+                            1u32,
+                            true,
+                        > {});
                         arg = v.accept_traces_data(arg, &mut resource_spans);
                         total += resource_spans.total;
                         (arg, total)
                     }
                 }
-                impl TracesDataVisitor<crate::pdata::otlp::PrecomputedSizes>
-                for TracesDataEncodedLen {
+                impl<
+                    const TAG: u32,
+                    const OPTION: bool,
+                > TracesDataVisitor<crate::pdata::otlp::PrecomputedSizes>
+                for TracesDataEncodedLen<TAG, OPTION> {
                     fn visit_traces_data(
                         &mut self,
                         mut arg: crate::pdata::otlp::PrecomputedSizes,
@@ -154,25 +128,29 @@ Derive rules on the `TracesData` message object derive the following code.
                     ) -> crate::pdata::otlp::PrecomputedSizes {
                         let idx = arg.len();
                         arg.reserve();
-                        let (mut arg, total_child_size) = self
-                            .children_encoded_size(arg, v);
-                        let total_size = if total_child_size == 0 {
-                            0
-                        } else {
-                            let tag_size = crate::pdata::otlp::PrecomputedSizes::varint_len(
-                                (self.tag << 3 | 2) as usize,
-                            );
-                            let total = tag_size
-                                + crate::pdata::otlp::PrecomputedSizes::varint_len(
-                                    total_child_size,
-                                ) + total_child_size;
-                            total
-                        };
-                        arg.set_size(idx, total_size);
+                        let (mut arg, total_child_size) = self.visit_children(arg, v);
+                        arg.set_size(
+                            idx,
+                            crate::pdata::otlp::encoders::conditional_length_delimited_size::<
+                                TAG,
+                                OPTION,
+                            >(total_child_size),
+                        );
                         arg
                     }
                 }
-                impl TracesData {}
+                impl TracesData {
+                    /// Calculate the precomputed sizing using an input to allow re-use.
+                    pub fn precompute_sizes(
+                        &self,
+                        mut input: crate::pdata::otlp::PrecomputedSizes,
+                    ) -> (crate::pdata::otlp::PrecomputedSizes, usize) {
+                        input.clear();
+                        let mut visitor = TracesDataEncodedLen::<0, false> {
+                        };
+                        visitor.visit_children(input, self)
+                    }
+                }
                 impl<
                     V: TracesDataVisitor<crate::pdata::otlp::PrecomputedSizes>,
                 > TracesDataVisitor<crate::pdata::otlp::PrecomputedSizes>
@@ -202,7 +180,7 @@ require debugging, and it will help us to know how to recognize them.
 Errors in the derived code will show up like the following, where "X"
 characters denote arbitrary errors inside the derived code.
 
-```
+```text
 error[E0XXX]: XXXXXXXXXXXXXXX
   --> rust/otel-arrow-rust/src/proto/./././opentelemetry.proto.collector.metrics.v1.rs:16:1
    |
@@ -227,13 +205,15 @@ the current expansion after modifying the procedural macros.
 
 If the derive macros are panicking, it becomes difficult to debug this
 way, and a backtrace of the Rust compiler tends to be difficult to
-interpret. In these cases, use `eprintln!("🚨 ...")` to make progress.
+interpret. In these cases, use `eprintln!("...")` to make progress.
 
 ## Macro debugging cycle
 
 We will proceed to run a two commands in one:
 
+```bash
 cargo expand > EXPANDED 2> EXPAND_ERRORS; cargo check 2> CHECKED
+```
 
 Inspect CHECKED for compiler errors and EXPANDED for the raw source
 code produced by the derive generation logic and EXPAND_ERRORS for
@@ -241,7 +221,9 @@ compiler errors during macro processing.
 
 When the check step succeeds, the next thing to verify are the tests:
 
+```bash
 cargo test > TEST_OUTPUT 2> TEST_ERROR
+```
 
 After the tests run, inspect both files to learn whether the tests
 passed or failed, then continue to iterate.
