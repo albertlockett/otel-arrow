@@ -3,4 +3,4 @@
 
 // TODO remove allow(dead_code) when we use what's in this module to encode OTAP
 #[allow(dead_code)]
-mod array;
+pub mod array;

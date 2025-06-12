@@ -27,6 +27,7 @@ use arrow::error::ArrowError;
 
 use crate::arrays::NullableArrayAccessor;
 use crate::encode::record::array::dictionary::DictionaryBuilder;
+use crate::pdata::U64Visitor;
 
 use dictionary::{
     AdaptiveDictionaryBuilder, CheckedDictionaryArrayAppend, ConvertToNativeHelper,
@@ -341,7 +342,7 @@ where
     TD8: DictionaryBuilder<UInt8Type>,
     TD16: DictionaryBuilder<UInt16Type>,
 {
-    fn finish(&mut self) -> Option<ArrayRef> {
+    pub fn finish(&mut self) -> Option<ArrayRef> {
         self.inner.as_mut().map(|builder| builder.finish())
     }
 }
@@ -390,6 +391,13 @@ pub type Int32ArrayBuilder = PrimitiveArrayBuilder<Int32Type>;
 pub type Int64ArrayBuilder = PrimitiveArrayBuilder<Int64Type>;
 pub type TimestampNanosecondArrayBuilder = PrimitiveArrayBuilder<TimestampNanosecondType>;
 pub type DurationNanosecondArrayBuilder = PrimitiveArrayBuilder<DurationNanosecondType>;
+
+impl<Argument> U64Visitor<Argument> for &mut TimestampNanosecondArrayBuilder {
+    fn visit_u64(&mut self, arg: Argument, value: u64) -> Argument {
+        self.append_value(&(value as i64));
+        arg
+    }
+}
 
 #[cfg(test)]
 pub mod test {
