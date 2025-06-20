@@ -7,6 +7,7 @@
 //! this in the future.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use pprof::criterion::{PProfProfiler, Output};
 
 use otap_df_otap::encoder::encode_logs_otap_batch;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, InstrumentationScope, KeyValue};
@@ -86,7 +87,16 @@ fn bench_encode_logs(c: &mut Criterion) {
 mod bench_entry {
     use super::*;
 
-    criterion_group!(benches, bench_encode_logs);
+    criterion_group!(
+        name = benches;
+        config = Criterion::default().with_profiler(
+            PProfProfiler::new(
+                100,
+                // Output::Protobuf
+                Output::Flamegraph(None)
+            ));
+        targets = bench_encode_logs
+    );
 }
 
 criterion_main!(bench_entry::benches);

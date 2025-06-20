@@ -31,6 +31,8 @@ async-unsync = "0.3.0"
 unsync = "0.1.2"
 tonic = "0.13.1"
 portpicker = "0.1.1"
+pprof = {version="0.15", features=["criterion","flamegraph","protobuf-codec", "frame-pointer"]}
+
 tokio-stream = "0.1.17"
 [lints]
 workspace = true
@@ -52,10 +54,11 @@ name = "otap_encoder"
 harness = false
 
 [profile.bench]
-opt-level = 3
-debug = false
-incremental = false
-lto = "fat"
-codegen-units = 1
-panic = "abort"
+debug=true
+# opt-level = 3
+# debug = true
+# incremental = false
+# lto = "fat"
+# codegen-units = 1
+# panic = "abort"
 

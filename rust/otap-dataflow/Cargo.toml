@@ -32,7 +32,7 @@ uuid = { version = "1.17.0", features = ["v4"] }
 async-trait = "0.1.88"
 futures = "0.3.31"
 log = "0.4"
-criterion = "0.6.0"
+criterion = "0.5.0"
 miette = { version="7.6.0", features = ["fancy"] }
 linkme = "0.3.33"
 
@@ -98,11 +98,11 @@ strip = true
 #panic = "abort"
 
 [profile.bench]
-inherits = "release"
+# inherits = "release"
 # Potentially override lto for faster builds:
 # lto = "thin"
 # Potentially override debug/strip for easier debugging:
-# debug = true
+debug = true
 # strip = "none"
 
 # cargo build --profile release-debug
