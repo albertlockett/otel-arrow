@@ -8,3 +8,6 @@ rustflags = ["-C", "target-cpu=native"]
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-linux-gnu-gcc"
 rustflags = ["-C", "target-cpu=native"]
+
+[build]
+rustflags = ["-Cforce-frame-pointers=yes"]

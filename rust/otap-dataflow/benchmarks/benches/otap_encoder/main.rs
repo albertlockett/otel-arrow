@@ -32,7 +32,7 @@ fn create_logs_data() -> LogsData {
 
             let mut lrs: Vec<LogRecord> = vec![];
 
-            for k in 0..1000 {
+            for k in 0..100 {
                 if k % 4 == 0 {
                     kvs.push(KeyValue::new("k3", AnyValue::new_int(1)));
                 }
@@ -103,8 +103,8 @@ mod bench_entry {
         config = Criterion::default().with_profiler(
             PProfProfiler::new(
                 519,
-                // Output::Protobuf
-                Output::Flamegraph(None)
+                Output::Protobuf
+                // Output::Flamegraph(None)
             ));
         targets = bench_encode_logs
     );
