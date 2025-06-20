@@ -6,7 +6,8 @@
 //! For now, this just contains a simple benchmark for encoding logs. We'll likely add more to
 //! this in the future.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use pprof::criterion::{PProfProfiler, Output};
 
 use otap_df_otap::encoder::encode_logs_otap_batch;
@@ -26,12 +27,12 @@ fn create_logs_data() -> LogsData {
         ];
         let res = Resource::new(kvs.clone());
         let mut sls: Vec<ScopeLogs> = vec![];
-        for _ in 0..1 {
+        for _ in 0..10 {
             let is1 = InstrumentationScope::new("library");
 
             let mut lrs: Vec<LogRecord> = vec![];
 
-            for k in 0..7 {
+            for k in 0..1000 {
                 if k % 4 == 0 {
                     kvs.push(KeyValue::new("k3", AnyValue::new_int(1)));
                 }
@@ -76,7 +77,17 @@ fn bench_encode_logs(c: &mut Criterion) {
         BenchmarkId::new("encode_otap_logs", "default"),
         &input,
         |b, input| {
-            b.iter(|| encode_logs_otap_batch(input).expect("function no errors"));
+            b.iter(|| {
+                let batch = black_box(encode_logs_otap_batch(black_box(input)).expect("function no errors"));
+                match batch.get(ArrowPayloadType::Logs) {
+                    Some(v) => if v.num_rows() == 0 {
+                        panic!("AHHHHHHHH");
+                    }
+                    None => {
+                        panic!("OH NO");
+                    }
+                }
+            });
         },
     );
 
@@ -91,7 +102,7 @@ mod bench_entry {
         name = benches;
         config = Criterion::default().with_profiler(
             PProfProfiler::new(
-                100,
+                519,
                 // Output::Protobuf
                 Output::Flamegraph(None)
             ));

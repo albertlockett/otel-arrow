@@ -103,7 +103,7 @@ strip = true
 # lto = "thin"
 # Potentially override debug/strip for easier debugging:
 debug = true
-# strip = "none"
+strip = "none"
 
 # cargo build --profile release-debug
 [profile.release-debug]

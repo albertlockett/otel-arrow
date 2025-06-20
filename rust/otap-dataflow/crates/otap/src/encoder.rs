@@ -175,6 +175,7 @@ where
         otap_batch.set(ArrowPayloadType::ScopeAttrs, scope_attrs_rb);
     }
 
+
     Ok(otap_batch)
 }
 
