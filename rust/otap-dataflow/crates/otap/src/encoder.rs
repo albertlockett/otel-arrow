@@ -95,31 +95,41 @@ where
                 }
 
                 // Set the resource fields for all logs in this scope
-                for _ in 0..logs_count {
-                    logs.resource.append_id(Some(curr_resource_id));
-                }
-                for _ in 0..logs_count {
-                    logs.resource.append_schema_url(resource_schema_url);
-                }
-                for _ in 0..logs_count {
-                    logs.resource
-                        .append_dropped_attributes_count(resource_dropped_attrs_count);
-                }
+                // for _ in 0..logs_count {
+                //     logs.resource.append_id(Some(curr_resource_id));
+                // }
+                logs.resource.append_id_n(Some(curr_resource_id), logs_count);
+
+                // for _ in 0..logs_count {
+                //     logs.resource.append_schema_url(resource_schema_url);
+                // }
+                logs.resource.append_schema_url_n(resource_schema_url, logs_count);
+
+                logs.resource.append_dropped_attributes_count_n(resource_dropped_attrs_count, logs_count);
+                // for _ in 0..logs_count {
+                //     logs.resource
+                //         .append_dropped_attributes_count(resource_dropped_attrs_count);
+                // }
 
                 // Set the scope fields for all logs in this scope
-                for _ in 0..logs_count {
-                    logs.scope.append_id(Some(curr_scope_id));
-                }
-                for _ in 0..logs_count {
-                    logs.scope.append_name(scope_name);
-                }
-                for _ in 0..logs_count {
-                    logs.scope.append_version(scope_version);
-                }
-                for _ in 0..logs_count {
-                    logs.scope
-                        .append_dropped_attributes_count(scope_dropped_attributes_count);
-                }
+                logs.scope.append_id_n(Some(curr_scope_id), logs_count);
+                // for _ in 0..logs_count {
+                //     logs.scope.append_id(Some(curr_scope_id));
+                // }
+                logs.scope.append_name_n(scope_name, logs_count);
+                // for _ in 0..logs_count {
+                //     logs.scope.append_name(scope_name);
+                // }
+                logs.scope.append_version_n(scope_version, logs_count);
+                // for _ in 0..logs_count {
+                //     logs.scope.append_version(scope_version);
+                // }
+                logs.scope
+                        .append_dropped_attributes_count_n(scope_dropped_attributes_count, logs_count);
+                // for _ in 0..logs_count {
+                //     logs.scope
+                //         .append_dropped_attributes_count(scope_dropped_attributes_count);
+                // }
 
                 let log_records_slice = &log_records_chunk[..logs_count];
 

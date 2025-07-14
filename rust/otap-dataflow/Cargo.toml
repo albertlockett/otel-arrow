@@ -16,13 +16,13 @@ publish = false
 rust-version = "1.86.0"
 
 [workspace.dependencies]
-arrow = "55"
-arrow-ipc = { version = "55", features=["zstd"] }
+arrow = "55.2"
+arrow-ipc = { version = "55.2", features=["zstd"] }
 ciborium = "0.2.2"
 futures-timer = "3.0"
 object_store = "0.12"
 otel-arrow-rust = { path = "../otel-arrow-rust"}
-parquet = { version = "55", default-features = false, features = ["arrow", "async", "object_store"]}
+parquet = { version = "55.2", default-features = false, features = ["arrow", "async", "object_store"]}
 tempfile = "3"
 thiserror = "2.0.12"
 serde = { version = "1.0.219", features = ["derive", "rc"] }
@@ -102,8 +102,8 @@ inherits = "release"
 # Potentially override lto for faster builds:
 # lto = "thin"
 # Potentially override debug/strip for easier debugging:
-# debug = true
-# strip = "none"
+debug = true
+strip = "none"
 
 # cargo build --profile release-debug
 [profile.release-debug]

@@ -76,6 +76,9 @@ pub trait ArrayAppend: ArrayAppendNulls {
     type Native;
 
     fn append_value(&mut self, value: &Self::Native);
+
+    /// TODO be consistent -- call this `append_value_n`
+    fn append_values(&mut self, value: &Self::Native, n: usize);
 }
 
 /// this trait implementation called by adaptive array builders on the base array builders to
@@ -107,6 +110,9 @@ pub trait ArrayAppendNulls {
 pub trait ArrayAppendStr {
     /// Append a value of type str to the builder
     fn append_str(&mut self, value: &str);
+
+    /// Append a value of type str to the builder `n` times
+    fn append_str_n(&mut self, value: &str, n: usize);
 }
 
 /// this trait can be implemented by types that can receive a value to append as a type of &[T].
@@ -119,6 +125,9 @@ pub trait ArrayAppendSlice {
     /// append a slice of T to the builder. Note that this does not append an individual
     /// element for each value in the slice, it appends the slice as a single row
     fn append_slice(&mut self, val: &[Self::Native]);
+
+    /// append the slice to the builder `n` times
+    fn append_slice_n(&mut self, val: &[Self::Native], n: usize);
 }
 
 /// Checked variant of ArrayAppendSlice for values that can return an error
@@ -492,6 +501,34 @@ where
         // restore the default value
         self.default_value = default_value;
     }
+
+    fn append_values(&mut self, value: &Self::Native, n: usize) {
+        match &mut self.inner {
+            InnerBuilder::Native(native_builder) => {
+                native_builder.append_values(value, n);
+            }
+            InnerBuilder::Dictionary(dictionary_builder) => {
+                match dictionary_builder.append_values(value, n) {
+                    Ok(_) => {}
+                    Err(DictionaryBuilderError::DictOverflow {}) => {
+                        let mut native = TN::new(self.inner_args.clone());
+                        dictionary_builder.to_native(&mut native);
+                        self.inner = InnerBuilder::Native(native);
+                        self.append_values(value, n); // retry
+                    }
+                }
+            }
+            InnerBuilder::Uninitialized(prefix) => {
+                if Self::is_default_value(&self.default_value, &value) {
+                    prefix.append_value();
+                } else {
+                    let mut prefix = self.initialize_inner().expect("can get prefix");
+                    prefix.init_builder(self, self.default_value.clone());
+                    self.append_values(value, n); // retry
+                }
+            }
+        }
+    }
 }
 
 impl<TArgs, TN, TD8, TD16> ArrayAppendStr for AdaptiveArrayBuilder<String, TArgs, TN, TD8, TD16>
@@ -548,6 +585,34 @@ where
             }
         }
     }
+
+    fn append_str_n(&mut self, value: &str, n: usize) {
+        match &mut self.inner {
+            InnerBuilder::Native(native_builder) => {
+                native_builder.append_str_n(value, n);
+            }
+            InnerBuilder::Dictionary(dictionary_builder) => {
+                match dictionary_builder.append_str_n(value, n) {
+                    Ok(_) => {}
+                    Err(DictionaryBuilderError::DictOverflow {}) => {
+                        let mut native = TN::new(self.inner_args.clone());
+                        dictionary_builder.to_native(&mut native);
+                        self.inner = InnerBuilder::Native(native);
+                        self.append_str_n(value, n); // retry
+                    }
+                }
+            }
+            InnerBuilder::Uninitialized(prefix) => {
+                if Self::is_default_value(&self.default_value, &value) {
+                    prefix.append_value();
+                } else {
+                    let mut prefix = self.initialize_inner().expect("can get prefix");
+                    prefix.init_builder(self, self.default_value.clone());
+                    self.append_str_n(value, n); // retry
+                }
+            }
+        }
+    }
 }
 
 impl<T, TArgs, TN, TD8, TD16> ArrayAppendSlice
@@ -591,6 +656,34 @@ where
         );
         // restore value of default value
         self.default_value = default_value
+    }
+
+    fn append_slice_n(&mut self, value: &[Self::Native], n: usize) {
+        match &mut self.inner {
+            InnerBuilder::Native(native_builder) => {
+                native_builder.append_slice_n(value, n);
+            }
+            InnerBuilder::Dictionary(dictionary_builder) => {
+                match dictionary_builder.append_slice_n(value, n) {
+                    Ok(_) => {}
+                    Err(DictionaryBuilderError::DictOverflow {}) => {
+                        let mut native = TN::new(self.inner_args.clone());
+                        dictionary_builder.to_native(&mut native);
+                        self.inner = InnerBuilder::Native(native);
+                        self.append_slice_n(value, n); // retry
+                    }
+                }
+            }
+            InnerBuilder::Uninitialized(prefix) => {
+                if Self::is_default_value(&self.default_value, &value) {
+                    prefix.append_value();
+                } else {
+                    let mut prefix = self.initialize_inner().expect("can get prefix");
+                    prefix.init_builder(self, self.default_value.clone());
+                    self.append_slice_n(value, n); // retry
+                }
+            }
+        }
     }
 }
 
