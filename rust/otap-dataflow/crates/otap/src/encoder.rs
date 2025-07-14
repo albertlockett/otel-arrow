@@ -52,6 +52,8 @@ where
 
         let resource_schema_url = resource_logs.schema_url();
 
+        let mut resource_log_count = 0;
+
         for scope_logs in resource_logs.scopes() {
             let scope = scope_logs.scope();
 
@@ -77,6 +79,8 @@ where
 
             let mut logs_record_iter = scope_logs.log_records();
 
+            let mut scope_log_count = 0;
+
             const CHUNK_SIZE: usize = 64;
             loop {
                 let mut logs_count = 0;
@@ -93,39 +97,20 @@ where
                 if logs_count == 0 {
                     break;
                 }
+                scope_log_count += logs_count;
 
                 // Set the resource fields for all logs in this scope
                 // for _ in 0..logs_count {
                 //     logs.resource.append_id(Some(curr_resource_id));
                 // }
-                logs.resource.append_id_n(Some(curr_resource_id), logs_count);
 
-                // for _ in 0..logs_count {
-                //     logs.resource.append_schema_url(resource_schema_url);
-                // }
-                logs.resource.append_schema_url_n(resource_schema_url, logs_count);
-
-                logs.resource.append_dropped_attributes_count_n(resource_dropped_attrs_count, logs_count);
                 // for _ in 0..logs_count {
                 //     logs.resource
                 //         .append_dropped_attributes_count(resource_dropped_attrs_count);
                 // }
 
                 // Set the scope fields for all logs in this scope
-                logs.scope.append_id_n(Some(curr_scope_id), logs_count);
-                // for _ in 0..logs_count {
-                //     logs.scope.append_id(Some(curr_scope_id));
-                // }
-                logs.scope.append_name_n(scope_name, logs_count);
-                // for _ in 0..logs_count {
-                //     logs.scope.append_name(scope_name);
-                // }
-                logs.scope.append_version_n(scope_version, logs_count);
-                // for _ in 0..logs_count {
-                //     logs.scope.append_version(scope_version);
-                // }
-                logs.scope
-                        .append_dropped_attributes_count_n(scope_dropped_attributes_count, logs_count);
+
                 // for _ in 0..logs_count {
                 //     logs.scope
                 //         .append_dropped_attributes_count(scope_dropped_attributes_count);
@@ -282,8 +267,23 @@ where
                     break;
                 }
             }
+
+                logs.scope.append_id_n(Some(curr_scope_id), scope_log_count);
+                logs.scope.append_name_n(scope_name, scope_log_count);
+                logs.scope.append_version_n(scope_version, scope_log_count);
+                logs.scope
+                        .append_dropped_attributes_count_n(scope_dropped_attributes_count, scope_log_count);
+
+                resource_log_count += scope_log_count;
             curr_scope_id += 1;
+
         }
+
+                        logs.resource.append_id_n(Some(curr_resource_id), resource_log_count);
+
+                logs.resource.append_schema_url_n(resource_schema_url, resource_log_count);
+
+                logs.resource.append_dropped_attributes_count_n(resource_dropped_attrs_count, resource_log_count);
     }
 
     let mut otap_batch = OtapBatch::Logs(Logs::default());
