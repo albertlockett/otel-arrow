@@ -155,6 +155,15 @@ impl LogsRecordBatchBuilder {
         }
     }
 
+    /// append a value to the `schema_url` array `n` times
+    pub fn append_schema_url_n(&mut self, val: Option<&str>, n: usize) {
+        if let Some(val) = val {
+            self.schema_url.append_str_n(val, n);
+        } else {
+            self.schema_url.append_nulls(n);
+        }
+    }
+
     /// append a value to the `severity_text` array
     pub fn append_severity_text(&mut self, val: Option<&str>) {
         if let Some(val) = val {

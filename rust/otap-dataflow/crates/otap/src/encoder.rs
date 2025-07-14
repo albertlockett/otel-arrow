@@ -99,23 +99,6 @@ where
                 }
                 scope_log_count += logs_count;
 
-                // Set the resource fields for all logs in this scope
-                // for _ in 0..logs_count {
-                //     logs.resource.append_id(Some(curr_resource_id));
-                // }
-
-                // for _ in 0..logs_count {
-                //     logs.resource
-                //         .append_dropped_attributes_count(resource_dropped_attrs_count);
-                // }
-
-                // Set the scope fields for all logs in this scope
-
-                // for _ in 0..logs_count {
-                //     logs.scope
-                //         .append_dropped_attributes_count(scope_dropped_attributes_count);
-                // }
-
                 let log_records_slice = &log_records_chunk[..logs_count];
 
                 // Set the log record fields for all logs in this scope
@@ -137,9 +120,7 @@ where
                             .map(|v| v as i64),
                     );
                 }
-                for _ in 0..logs_count {
-                    logs.append_schema_url(scope_schema_url);
-                }
+                logs.append_schema_url_n(scope_schema_url, logs_count);
                 for log_record in log_records_slice {
                     logs.append_severity_number(
                         log_record
