@@ -13,6 +13,7 @@ nodes:
         dispatch_strategy: round_robin
     config:
       listening_addr: "127.0.0.1:4317"
+      message_size: 100
 
   perf:
     kind: exporter

@@ -30,6 +30,10 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
+    log::debug!("Test env logger setup");
+
     let args = Args::parse();
 
     // Load pipeline configuration from file

@@ -149,6 +149,11 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                 }
                 //send data
                 Message::PData(message) => {
+                    let message1: otel_arrow_rust::otap::OtapArrowRecords = message.try_into()?;
+                    let logs_rb = message1.get(otel_arrow_rust::proto::opentelemetry::arrow::v1::ArrowPayloadType::Logs);
+                    println!("{:?}", logs_rb);
+                    let message: OtapPdata = message1.into();
+                    
                     let message: OtapArrowBytes = message.try_into()?;
 
                     match message {
