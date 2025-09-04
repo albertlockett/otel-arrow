@@ -10,7 +10,7 @@
 use crate::OTAP_EXPORTER_FACTORIES;
 use crate::grpc::OtapArrowBytes;
 use crate::metrics::ExporterPDataMetrics;
-use crate::pdata::OtapPdata;
+use crate::pdata::{ConsumableOtapArrowBytes, OtapPdata};
 use async_stream::stream;
 use async_trait::async_trait;
 use linkme::distributed_slice;
@@ -21,7 +21,7 @@ use otap_df_engine::context::PipelineContext;
 use otap_df_engine::control::NodeControlMsg;
 use otap_df_engine::error::Error;
 use otap_df_engine::exporter::ExporterWrapper;
-use otap_df_engine::local::exporter as local;
+use otap_df_engine::local::{exporter as local, message};
 use otap_df_engine::message::{Message, MessageChannel};
 use otap_df_engine::node::NodeId;
 use otap_df_otlp::compression::CompressionMethod;
@@ -177,9 +177,10 @@ impl local::Exporter<OtapPdata> for OTAPExporter {
                     let signal_type = pdata.signal_type();
 
                     self.pdata_metrics.inc_consumed(signal_type);
-                    let message: OtapArrowBytes = pdata
+                    let message: ConsumableOtapArrowBytes = pdata
                         .try_into()
                         .inspect_err(|_| self.pdata_metrics.inc_failed(signal_type))?;
+                    let message = message.otap_arrow_bytes;
 
                     match message {
                         // match on OTAPData type and use the respective client to send message

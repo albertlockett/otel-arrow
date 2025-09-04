@@ -144,7 +144,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build stream reader"))]
+    #[snafu(display("Failed to build stream reader {}", source))]
     BuildStreamReader {
         #[snafu(source)]
         source: ArrowError,
@@ -152,7 +152,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build stream writer"))]
+    #[snafu(display("Failed to build stream writer {}", source))]
     BuildStreamWriter {
         #[snafu(source)]
         source: ArrowError,
@@ -160,7 +160,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read record batch"))]
+    #[snafu(display("Failed to read record batch {}", source))]
     ReadRecordBatch {
         #[snafu(source)]
         source: ArrowError,

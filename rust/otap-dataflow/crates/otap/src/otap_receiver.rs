@@ -29,10 +29,11 @@ use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
     arrow_metrics_service_server::ArrowMetricsServiceServer,
     arrow_traces_service_server::ArrowTracesServiceServer,
 };
+use otel_arrow_rust::Consumer;
 use serde::Deserialize;
 use serde_json::Value;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tonic::codegen::tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
@@ -117,13 +118,15 @@ impl shared::Receiver<OtapPdata> for OTAPReceiver {
         let listener = effect_handler.tcp_listener(self.config.listening_addr)?;
         let listener_stream = TcpListenerStream::new(listener);
 
+        let consumer = Arc::new(Mutex::new(Consumer::default()));
+
         //create services for the grpc server and clone the effect handler to pass message
         let logs_service =
-            ArrowLogsServiceImpl::new(effect_handler.clone(), self.config.message_size);
+            ArrowLogsServiceImpl::new(consumer.clone(), effect_handler.clone(), self.config.message_size);
         let metrics_service =
-            ArrowMetricsServiceImpl::new(effect_handler.clone(), self.config.message_size);
+            ArrowMetricsServiceImpl::new(consumer.clone(), effect_handler.clone(), self.config.message_size);
         let trace_service =
-            ArrowTracesServiceImpl::new(effect_handler.clone(), self.config.message_size);
+            ArrowTracesServiceImpl::new(consumer.clone(), effect_handler.clone(), self.config.message_size);
 
         let mut logs_service_server = ArrowLogsServiceServer::new(logs_service);
         let mut metrics_service_server = ArrowMetricsServiceServer::new(metrics_service);

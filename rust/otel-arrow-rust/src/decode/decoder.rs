@@ -44,9 +44,24 @@ impl StreamConsumer {
 }
 
 /// Consumer consumes OTAP `BatchArrowRecords` and can convert them into OTLP messages.
-#[derive(Default)]
+// #[derive(Default)]
 pub struct Consumer {
     stream_consumers: HashMap<String, StreamConsumer>,
+}
+
+impl Default for Consumer {
+    fn default() -> Self {
+        println!("creating new consumer");
+        Self {
+            stream_consumers: Default::default(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Consumer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!("debug impl")
+    }
 }
 
 impl Consumer {
@@ -68,6 +83,7 @@ impl Consumer {
 
             let stream_consumer = match self.stream_consumers.get_mut(&schema_id) {
                 None => {
+                    println!("creating new schema consumer for schema id {:?}", schema_id);
                     // stream consumer does not exist, remove all stream consumer with
                     // the same payload_type since schema already changed for that payload.
                     let new_stream_consumer: HashMap<String, StreamConsumer> =
@@ -97,6 +113,7 @@ impl Consumer {
                     record,
                 });
             } else {
+                println!("here in TODO to handle finished stream consumer ...");
                 //todo: handle stream reader finished
             }
         }

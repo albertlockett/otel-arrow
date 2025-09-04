@@ -64,6 +64,7 @@ fn parse_core_id_range(s: &str) -> Result<CoreAllocation, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
     let args = Args::parse();
 
     // For now, we predefine pipeline group and pipeline IDs.

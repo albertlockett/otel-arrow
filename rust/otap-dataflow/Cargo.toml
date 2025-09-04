@@ -35,6 +35,7 @@ otap-df-controller = { path = "crates/controller" }
 otap-df-otap = { path = "crates/otap" }
 thiserror.workspace = true
 serde_json.workspace = true
+env_logger = "0.11.8"
 clap = { version = "4.5.42", features = ["derive"] }
 mimalloc-rust = "0.2.1"
 

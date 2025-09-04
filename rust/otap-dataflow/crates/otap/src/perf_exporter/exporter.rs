@@ -144,7 +144,8 @@ impl local::Exporter<OtapPdata> for PerfExporter {
 
                     let batch: OtapArrowRecords = match pdata.try_into() {
                         Ok(batch) => batch,
-                        Err(_) => {
+                        Err(e) => {
+                           log::error!("error converting pdata: {:?}", e);
                             self.pdata_metrics.inc_failed(signal_type);
                             continue;
                         }

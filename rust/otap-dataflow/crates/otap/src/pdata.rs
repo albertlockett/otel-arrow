@@ -89,6 +89,9 @@
 //!                                                                           
 //! ```
 
+use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
+
 use otap_df_config::experimental::SignalType;
 use otap_df_pdata_views::otlp::bytes::logs::RawLogsData;
 use otap_df_pdata_views::otlp::bytes::traces::RawTraceData;
@@ -145,6 +148,16 @@ impl OtlpProtoBytes {
     }
 }
 
+/// TODO docs
+// TODO weird name ...
+#[derive(Clone, Debug)]
+pub struct ConsumableOtapArrowBytes {
+    /// TODO docs
+    pub otap_arrow_bytes: OtapArrowBytes,
+    /// TODO docs
+    pub consumer: Arc<Mutex<Consumer>>,
+}
+
 /// Container for the various representations of the telemetry data
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -153,7 +166,7 @@ pub enum OtapPdata {
     OtlpBytes(OtlpProtoBytes),
 
     /// data is contained in `BatchArrowRecords`, which contain ArrowIPC serialized
-    OtapArrowBytes(OtapArrowBytes),
+    OtapArrowBytes(ConsumableOtapArrowBytes),
 
     /// data is contained in `OtapBatch` which contains Arrow `RecordBatches` for OTAP payload type
     OtapArrowRecords(OtapArrowRecords),
@@ -165,7 +178,7 @@ impl OtapPdata {
     pub fn signal_type(&self) -> SignalType {
         match self {
             Self::OtlpBytes(inner) => inner.signal_type(),
-            Self::OtapArrowBytes(inner) => inner.signal_type(),
+            Self::OtapArrowBytes(inner) => inner.otap_arrow_bytes.signal_type(),
             Self::OtapArrowRecords(inner) => inner.signal_type(),
         }
     }
@@ -223,8 +236,8 @@ impl From<OtlpProtoBytes> for OtapPdata {
     }
 }
 
-impl From<OtapArrowBytes> for OtapPdata {
-    fn from(value: OtapArrowBytes) -> Self {
+impl From<ConsumableOtapArrowBytes> for OtapPdata {
+    fn from(value: ConsumableOtapArrowBytes) -> Self {
         Self::OtapArrowBytes(value)
     }
 }
@@ -253,7 +266,7 @@ impl TryFrom<OtapPdata> for OtlpProtoBytes {
     }
 }
 
-impl TryFrom<OtapPdata> for OtapArrowBytes {
+impl TryFrom<OtapPdata> for ConsumableOtapArrowBytes {
     type Error = error::Error;
 
     fn try_from(value: OtapPdata) -> Result<Self, Self::Error> {
@@ -341,7 +354,7 @@ impl TryFrom<OtlpProtoBytes> for OtapArrowRecords {
     }
 }
 
-impl TryFrom<OtlpProtoBytes> for OtapArrowBytes {
+impl TryFrom<OtlpProtoBytes> for ConsumableOtapArrowBytes {
     type Error = error::Error;
 
     fn try_from(value: OtlpProtoBytes) -> Result<Self, Self::Error> {
@@ -350,24 +363,26 @@ impl TryFrom<OtlpProtoBytes> for OtapArrowBytes {
     }
 }
 
-impl TryFrom<OtapArrowBytes> for OtlpProtoBytes {
+impl TryFrom<ConsumableOtapArrowBytes> for OtlpProtoBytes {
     type Error = error::Error;
 
-    fn try_from(value: OtapArrowBytes) -> Result<Self, Self::Error> {
+    fn try_from(value: ConsumableOtapArrowBytes) -> Result<Self, Self::Error> {
         let otap_batch: OtapArrowRecords = value.try_into()?;
         otap_batch.try_into()
     }
 }
 
-impl TryFrom<OtapArrowBytes> for OtapArrowRecords {
+impl TryFrom<ConsumableOtapArrowBytes> for OtapArrowRecords {
     type Error = error::Error;
 
-    fn try_from(value: OtapArrowBytes) -> Result<Self, Self::Error> {
+    fn try_from(value: ConsumableOtapArrowBytes) -> Result<Self, Self::Error> {
         let map_error = |error: otel_arrow_rust::error::Error| error::Error::ConversionError {
             error: format!("error decoding BatchArrowRecords: {error}"),
         };
-        let mut consumer = Consumer::default();
-        match value {
+        // let mut consumer = Consumer::default();
+        let mut consumer = value.consumer.lock().expect("mutex poisoned");
+
+        match value.otap_arrow_bytes {
             OtapArrowBytes::ArrowLogs(mut bar) => {
                 let record_messages = consumer.consume_bar(&mut bar).map_err(map_error)?;
                 Ok(Self::Logs(from_record_messages(record_messages)))
@@ -384,7 +399,7 @@ impl TryFrom<OtapArrowBytes> for OtapArrowRecords {
     }
 }
 
-impl TryFrom<OtapArrowRecords> for OtapArrowBytes {
+impl TryFrom<OtapArrowRecords> for ConsumableOtapArrowBytes {
     type Error = error::Error;
 
     fn try_from(mut otap_batch: OtapArrowRecords) -> Result<Self, Self::Error> {
@@ -395,10 +410,15 @@ impl TryFrom<OtapArrowRecords> for OtapArrowBytes {
                 .map_err(|e| error::Error::ConversionError {
                     error: format!("error encoding BatchArrowRecords: {e}"),
                 })?;
-        Ok(match otap_batch {
-            OtapArrowRecords::Logs(_) => Self::ArrowLogs(bar),
-            OtapArrowRecords::Metrics(_) => Self::ArrowMetrics(bar),
-            OtapArrowRecords::Traces(_) => Self::ArrowTraces(bar),
+        let otap_arrow_bytes = match otap_batch {
+            OtapArrowRecords::Logs(_) => OtapArrowBytes::ArrowLogs(bar),
+            OtapArrowRecords::Metrics(_) => OtapArrowBytes::ArrowMetrics(bar),
+            OtapArrowRecords::Traces(_) => OtapArrowBytes::ArrowTraces(bar),
+        };
+
+        Ok(ConsumableOtapArrowBytes { 
+            otap_arrow_bytes,
+            consumer: Arc::new(Mutex::new(Consumer::default()))
         })
     }
 }

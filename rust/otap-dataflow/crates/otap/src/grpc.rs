@@ -12,22 +12,21 @@
 //!
 
 use otap_df_engine::shared::receiver as shared;
-use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
-    BatchArrowRecords, BatchStatus, StatusCode, arrow_logs_service_server::ArrowLogsService,
-    arrow_metrics_service_server::ArrowMetricsService,
-    arrow_traces_service_server::ArrowTracesService,
-};
-use std::pin::Pin;
+use otel_arrow_rust::{proto::opentelemetry::arrow::v1::{
+    arrow_logs_service_server::ArrowLogsService, arrow_metrics_service_server::ArrowMetricsService, arrow_traces_service_server::ArrowTracesService, BatchArrowRecords, BatchStatus, StatusCode
+}, Consumer};
+use std::{pin::Pin, sync::{Arc, Mutex}};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::pdata::OtapPdata;
+use crate::pdata::{ConsumableOtapArrowBytes, OtapPdata};
 
 pub mod otlp;
 
 /// struct that implements the ArrowLogsService trait
 pub struct ArrowLogsServiceImpl {
+    consumer: Arc<Mutex<Consumer>>,
     effect_handler: shared::EffectHandler<OtapPdata>,
     channel_size: usize,
 }
@@ -35,8 +34,13 @@ pub struct ArrowLogsServiceImpl {
 impl ArrowLogsServiceImpl {
     /// create a new ArrowLogsServiceImpl struct with a sendable effect handler
     #[must_use]
-    pub fn new(effect_handler: shared::EffectHandler<OtapPdata>, channel_size: usize) -> Self {
+    pub fn new(
+        consumer: Arc<Mutex<Consumer>>,
+        effect_handler: shared::EffectHandler<OtapPdata>,
+        channel_size: usize
+    ) -> Self {
         Self {
+            consumer,
             effect_handler,
             channel_size,
         }
@@ -44,6 +48,7 @@ impl ArrowLogsServiceImpl {
 }
 /// struct that implements the ArrowMetricsService trait
 pub struct ArrowMetricsServiceImpl {
+        consumer: Arc<Mutex<Consumer>>,
     effect_handler: shared::EffectHandler<OtapPdata>,
     channel_size: usize,
 }
@@ -51,8 +56,11 @@ pub struct ArrowMetricsServiceImpl {
 impl ArrowMetricsServiceImpl {
     /// create a new ArrowMetricsServiceImpl struct with a sendable effect handler
     #[must_use]
-    pub fn new(effect_handler: shared::EffectHandler<OtapPdata>, channel_size: usize) -> Self {
+    pub fn new(
+        consumer: Arc<Mutex<Consumer>>,
+        effect_handler: shared::EffectHandler<OtapPdata>, channel_size: usize) -> Self {
         Self {
+            consumer,
             effect_handler,
             channel_size,
         }
@@ -61,6 +69,7 @@ impl ArrowMetricsServiceImpl {
 
 /// struct that implements the ArrowTracesService trait
 pub struct ArrowTracesServiceImpl {
+        consumer: Arc<Mutex<Consumer>>,
     effect_handler: shared::EffectHandler<OtapPdata>,
     channel_size: usize,
 }
@@ -68,8 +77,11 @@ pub struct ArrowTracesServiceImpl {
 impl ArrowTracesServiceImpl {
     /// create a new ArrowTracesServiceImpl struct with a sendable effect handler
     #[must_use]
-    pub fn new(effect_handler: shared::EffectHandler<OtapPdata>, channel_size: usize) -> Self {
+    pub fn new(
+            consumer: Arc<Mutex<Consumer>>,
+        effect_handler: shared::EffectHandler<OtapPdata>, channel_size: usize) -> Self {
         Self {
+            consumer,
             effect_handler,
             channel_size,
         }
@@ -88,6 +100,7 @@ impl ArrowLogsService for ArrowLogsServiceImpl {
         // ToDo [LQ] How can we abstract this to avoid any dependency on Tokio inside receiver implementations.
         let (tx, rx) = tokio::sync::mpsc::channel(self.channel_size);
         let effect_handler_clone = self.effect_handler.clone();
+        // let consumer_clone = self.consumer.clone();
 
         // Provide client a stream to listen to
         let output = ReceiverStream::new(rx);
@@ -95,17 +108,24 @@ impl ArrowLogsService for ArrowLogsServiceImpl {
         // write to the channel
         // ToDo [LQ] How can we abstract this to avoid any dependency on Tokio inside receiver implementations.
         _ = tokio::spawn(async move {
+            println!("stream starting");
+            let consumer = Arc::new(Mutex::new(Consumer::default()));
             // Process messages until stream ends or error occurs
             while let Ok(Some(batch)) = input_stream.message().await {
+                println!("received message");
                 // accept the batch data and handle output response
-                if accept_data(OtapArrowBytes::ArrowLogs, batch, &effect_handler_clone, &tx)
+                if accept_data(OtapArrowBytes::ArrowLogs, 
+                    consumer.clone(),
+                    batch, &effect_handler_clone, &tx)
                     .await
                     .is_err()
                 {
+                    println!("stream error happen");
                     // end loop if error occurs
                     break;
                 }
             }
+            println!("stream ended")
         });
 
         Ok(Response::new(Box::pin(output) as Self::ArrowLogsStream))
@@ -123,6 +143,7 @@ impl ArrowMetricsService for ArrowMetricsServiceImpl {
         let mut input_stream = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(self.channel_size);
         let effect_handler_clone = self.effect_handler.clone();
+        let consumer_clone = self.consumer.clone();
 
         // Provide client a stream to listen to
         let output = ReceiverStream::new(rx);
@@ -134,6 +155,7 @@ impl ArrowMetricsService for ArrowMetricsServiceImpl {
                 // accept the batch data and handle output response
                 if accept_data(
                     OtapArrowBytes::ArrowMetrics,
+                    consumer_clone.clone(),
                     batch,
                     &effect_handler_clone,
                     &tx,
@@ -162,6 +184,7 @@ impl ArrowTracesService for ArrowTracesServiceImpl {
         let mut input_stream = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(self.channel_size);
         let effect_handler_clone = self.effect_handler.clone();
+        let consumer_clone = self.consumer.clone();
 
         // create a stream to output result to
         let output = ReceiverStream::new(rx);
@@ -173,6 +196,7 @@ impl ArrowTracesService for ArrowTracesServiceImpl {
                 // accept the batch data and handle output response
                 if accept_data(
                     OtapArrowBytes::ArrowTraces,
+                    consumer_clone.clone(),
                     batch,
                     &effect_handler_clone,
                     &tx,
@@ -193,6 +217,7 @@ impl ArrowTracesService for ArrowTracesServiceImpl {
 /// handles sending the data down the pipeline via effect_handler and generating the approriate response
 async fn accept_data<OTAPDataType>(
     otap_data: OTAPDataType,
+    consumer: Arc<Mutex<Consumer>>,
     batch: BatchArrowRecords,
     effect_handler: &shared::EffectHandler<OtapPdata>,
     tx: &tokio::sync::mpsc::Sender<Result<BatchStatus, Status>>,
@@ -201,7 +226,11 @@ where
     OTAPDataType: Fn(BatchArrowRecords) -> OtapArrowBytes,
 {
     let batch_id = batch.batch_id;
-    let status_result = match effect_handler.send_message(otap_data(batch).into()).await {
+    let pdata: OtapPdata = ConsumableOtapArrowBytes {
+        consumer: consumer,
+        otap_arrow_bytes: otap_data(batch)
+    }.into();
+    let status_result = match effect_handler.send_message(pdata).await {
         Ok(_) => (StatusCode::Ok, "Successfully received".to_string()),
         Err(error) => (StatusCode::Canceled, error.to_string()),
     };
