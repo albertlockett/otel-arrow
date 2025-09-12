@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 arrow = { version = "55.2.0", features = ["prettyprint", "chrono-tz"] }
 datafusion = "49.0.2"
-
+data_engine_kql_parser = { path = "../experimental/query_engine/kql-parser" }
+data_engine_expressions = { path = "../experimental/query_engine/expressions" }
 tokio = {version = "1", features = ["full"] }
 
 
