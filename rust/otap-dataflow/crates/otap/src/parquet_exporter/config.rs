@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use parquet::file::properties::WriterProperties;
 use serde::Deserialize;
 
 /// Configuration of parquet exporter
@@ -43,6 +44,23 @@ pub struct WriterOptions {
     #[serde(default)]
     #[serde(with = "humantime_serde")]
     pub flush_when_older_than: Option<Duration>,
+
+    data_page_size_limit: Option<usize>,
+    data_page_row_count_limit: Option<usize>,
+    write_batch_size: Option<usize>,
+    max_row_group_size: Option<usize>,
+    bloom_filter_position: Option<BloomFilterPosition>,
+    // writer version
+    created_by: Option<String>,
+    offset_index_disabled: Option<bool>,
+    key_value_metadata: Option<Vec<KeyValue>>,
+    default_column_properties: ColumnProperties,
+
+    // column_properties: HashMap<ColumnPath, ColumnProperties>,
+    // sorting_columns: Option<Vec<SortingColumn>>,
+    column_index_truncate_length: Option<usize>,
+    statistics_truncate_length: Option<usize>,
+    coerce_types: Option<bool>,
 }
 
 impl Default for WriterOptions {
@@ -50,8 +68,105 @@ impl Default for WriterOptions {
         Self {
             flush_when_older_than: None,
             target_rows_per_file: Some(100_000_000),
+            data_page_size_limit: None,
+            data_page_row_count_limit: None,
+            write_batch_size: None,
+            bloom_filter_position: None,
+            created_by: None,
+            offset_index_disabled: None,
+            key_value_metadata: None,
+            
+
         }
     }
+}
+
+/// Where in the file [`ArrowWriter`](crate::arrow::arrow_writer::ArrowWriter) should
+/// write Bloom filters
+///
+/// Basic constant, which is not part of the Thrift definition.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub enum BloomFilterPosition {
+    /// Write Bloom Filters of each row group right after the row group
+    ///
+    /// This saves memory by writing it as soon as it is computed, at the cost
+    /// of data locality for readers
+    AfterRowGroup,
+    /// Write Bloom Filters at the end of the file
+    ///
+    /// This allows better data locality for readers, at the cost of memory usage
+    /// for writers.
+    End,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct KeyValue {
+    pub key: String,
+    pub value: Option<String>
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ColumnProperties {
+    encoding: Option<Encoding>,
+    // TODO
+    // codec: Option<Compression>
+    dictionary_page_size_limit: Option<usize>,
+    dictionary_enabled: Option<bool>,
+    statistics_enabled: Option<bool>,
+    write_page_header_statistics: Option<bool>,
+
+    // TODO
+    // bloom_filter_properties: Option<BloomFilterProperties>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[allow(non_camel_case_types)]
+pub enum Encoding {
+    /// Default byte encoding.
+    /// - BOOLEAN - 1 bit per value, 0 is false; 1 is true.
+    /// - INT32 - 4 bytes per value, stored as little-endian.
+    /// - INT64 - 8 bytes per value, stored as little-endian.
+    /// - FLOAT - 4 bytes per value, stored as little-endian.
+    /// - DOUBLE - 8 bytes per value, stored as little-endian.
+    /// - BYTE_ARRAY - 4 byte length stored as little endian, followed by bytes.
+    /// - FIXED_LEN_BYTE_ARRAY - just the bytes are stored.
+    PLAIN,
+
+    /// Group packed run length encoding.
+    ///
+    /// Usable for definition/repetition levels encoding and boolean values.
+    RLE,
+
+    /// Delta encoding for integers, either INT32 or INT64.
+    ///
+    /// Works best on sorted data.
+    DELTA_BINARY_PACKED,
+
+    /// Encoding for byte arrays to separate the length values and the data.
+    ///
+    /// The lengths are encoded using DELTA_BINARY_PACKED encoding.
+    DELTA_LENGTH_BYTE_ARRAY,
+
+    /// Incremental encoding for byte arrays.
+    ///
+    /// Prefix lengths are encoded using DELTA_BINARY_PACKED encoding.
+    /// Suffixes are stored using DELTA_LENGTH_BYTE_ARRAY encoding.
+    DELTA_BYTE_ARRAY,
+
+    /// Dictionary encoding.
+    ///
+    /// The ids are encoded using the RLE encoding.
+    RLE_DICTIONARY,
+
+    /// Encoding for fixed-width data.
+    ///
+    /// K byte-streams are created where K is the size in bytes of the data type.
+    /// The individual bytes of a value are scattered to the corresponding stream and
+    /// the streams are concatenated.
+    /// This itself does not reduce the size of the data but can lead to better compression
+    /// afterwards. Note that the use of this encoding with FIXED_LEN_BYTE_ARRAY(N) data may
+    /// perform poorly for large values of N.
+    BYTE_STREAM_SPLIT,
 }
 
 /// Configuration options for how the parquet files should be partitioned
@@ -90,6 +205,7 @@ mod test {
             writer_options: Some(WriterOptions {
                 flush_when_older_than: Some(Duration::from_secs(300)),
                 target_rows_per_file: Some(1000000000),
+                ..Default::default()
             }),
         };
         assert_eq!(config, expected)
