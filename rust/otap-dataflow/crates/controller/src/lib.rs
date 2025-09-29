@@ -299,8 +299,17 @@ impl<PData: 'static + Clone + Send + Sync + std::fmt::Debug> Controller<PData> {
             .build(pipeline_handle, pipeline_config.clone())
             .map_err(|e| Error::PipelineRuntimeError {
                 source: Box::new(e),
-            })?;
+            });
 
+       let runtime_pipeline = match runtime_pipeline {
+            Ok(rp) => rp,
+            Err(e) => {
+                println!("error {:?}", e);
+                return Err(e)
+            }
+        };
+
+        
         // Start the pipeline (this will use the current thread's Tokio runtime)
         runtime_pipeline
             .run_forever(

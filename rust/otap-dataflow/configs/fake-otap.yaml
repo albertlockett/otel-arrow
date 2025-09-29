@@ -6,19 +6,22 @@ settings:
 nodes:
   receiver:
     kind: receiver
-    plugin_urn: "urn:otel:otap:receiver"
+    plugin_urn: "urn:otel:otap:fake_data_generator:receiver"
     out_ports:
       out_port:
         destinations:
           - exporter
         dispatch_strategy: round_robin
     config:
-      listening_addr: "127.0.0.1:4317"
-      compression_method: zstd
-      message_size: 256
+      traffic_config:
+        signals_per_second: 1000000
+        max_signal_count: null
+        metric_weight: 0
+        trace_weight: 0
+        log_weight: 30
+      registry_path: https://github.com/open-telemetry/semantic-conventions.git[model]
   exporter:
     kind: exporter
     plugin_urn: "urn:otel:otap:exporter"
     config:
-      grpc_endpoint: "http://127.0.0.1:4318"
-
+      grpc_endpoint: "http://127.0.0.1:4317"

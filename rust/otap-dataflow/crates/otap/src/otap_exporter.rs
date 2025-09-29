@@ -354,7 +354,8 @@ async fn stream_arrow_batches<T: StreamingArrowService>(
                             shutdown_rx.clone()
                         ).await;
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        println!("export error {:?}", e);
                         // there was an error initiating the streaming request
                         _ = pdata_metrics_tx.send(PDataMetricsUpdate::IncFailed(signal_type)).await;
                         log::error!("failed request, waiting {failed_request_backoff:?}");
@@ -424,7 +425,8 @@ async fn handle_res_stream(
                         // sender disconnected
                         break
                     }
-                    Err(_grpc_status) => {
+                    Err(grpc_status) => {
+                        println!("export error {:?}", grpc_status);
                         _ = pdata_metrics_tx.send(PDataMetricsUpdate::IncFailed(signal_type)).await;
                         break
                     }

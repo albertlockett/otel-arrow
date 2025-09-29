@@ -114,7 +114,11 @@ impl<PData: 'static + Debug + Clone> RuntimePipeline<PData> {
             );
             let pipeline_ctrl_msg_tx = pipeline_ctrl_msg_tx.clone();
             futures.push(
-                local_tasks.spawn_local(async move { exporter.start(pipeline_ctrl_msg_tx).await }),
+                local_tasks.spawn_local(async move { 
+                    let result = exporter.start(pipeline_ctrl_msg_tx).await;
+                    println!("export start result = {:?}", result);
+                    result
+                 }),
             );
         }
         for processor in self.processors {
@@ -125,7 +129,11 @@ impl<PData: 'static + Debug + Clone> RuntimePipeline<PData> {
             );
             let pipeline_ctrl_msg_tx = pipeline_ctrl_msg_tx.clone();
             futures.push(
-                local_tasks.spawn_local(async move { processor.start(pipeline_ctrl_msg_tx).await }),
+                local_tasks.spawn_local(async move { 
+                    let result = processor.start(pipeline_ctrl_msg_tx).await;
+                    println!("processor start result = {:?}", result);
+                    return result
+                }),
             );
         }
         for receiver in self.receivers {
@@ -136,7 +144,11 @@ impl<PData: 'static + Debug + Clone> RuntimePipeline<PData> {
             );
             let pipeline_ctrl_msg_tx = pipeline_ctrl_msg_tx.clone();
             futures.push(
-                local_tasks.spawn_local(async move { receiver.start(pipeline_ctrl_msg_tx).await }),
+                local_tasks.spawn_local(async move { 
+                    let result = receiver.start(pipeline_ctrl_msg_tx).await;
+                    println!("receiver start result = {:?}", result);
+                    return result
+                 }),
             );
         }
 
