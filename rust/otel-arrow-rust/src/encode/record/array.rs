@@ -634,8 +634,9 @@ pub fn binary_to_utf8_array(src: &ArrayRef) -> Result<ArrayRef, ArrowError> {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .expect("is binary array");
-        return StringArray::try_from_binary(binary_arr.clone())
-            .map(|arr| Arc::new(arr) as ArrayRef);
+        // return StringArray::try_from_binary(binary_arr.clone())
+        //     .map(|arr| Arc::new(arr) as ArrayRef);
+        return binary_array_to_string_array(binary_arr.clone()).map(|arr| Arc::new(arr) as ArrayRef);
     }
 
     if let DataType::Dictionary(k, v) = src_data_type {
@@ -680,12 +681,45 @@ fn binary_dict_to_utf8_dict_array<K: ArrowDictionaryKeyType>(
                 dict_arr.value_type()
             ))
         })?;
-    let new_values = StringArray::try_from_binary(values.clone())?;
+    // let new_values = StringArray::try_from_binary(values.clone())?;
+    let new_values = binary_array_to_string_array(values.clone())?;
 
     Ok(Arc::new(DictionaryArray::new(
         dict_arr.keys().clone(),
         Arc::new(new_values),
     )))
+}
+
+pub fn binary_array_to_string_array(binary_array: BinaryArray) -> Result<StringArray, ArrowError> {
+    use arrow::datatypes::ArrowNativeType;
+
+    let (offsets, values, nulls) = binary_array.into_parts();
+
+    let validated = simdutf8::basic::from_utf8(&values).map_err(|e| {
+        ArrowError::InvalidArgumentError(format!("Encountered non UTF-8 data: {e}"))
+    })?;
+
+    for offset in offsets.iter() {
+        let o = offset.as_usize();
+        if !validated.is_char_boundary(o) {
+            if o < validated.len() {
+                return Err(ArrowError::InvalidArgumentError(format!(
+                    "Split UTF-8 codepoint at offset {o}"
+                )));
+            }
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "Offset of {o} exceeds length of values {}",
+                validated.len()
+            )));
+        }
+    }
+
+    // TODO better comment
+    // safety: we done validation above
+    #[allow(unsafe_code)]
+    let str_arr = unsafe { StringArray::new_unchecked(offsets, values, nulls) };
+
+    Ok(str_arr)
 }
 
 #[cfg(test)]
