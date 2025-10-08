@@ -72,3 +72,71 @@ pub mod otlp_grpc;
 /// Factory for OTAP-based pipeline
 #[pipeline_factory(OTAP, OtapPdata)]
 pub static OTAP_PIPELINE_FACTORY: PipelineFactory<OtapPdata> = build_factory();
+
+
+#[cfg(test)]
+mod test {
+    use std::fs::File;
+
+    use arrow_ipc::writer::FileWriter;
+    use arrow_ipc::reader::FileReader;
+    use otel_arrow_rust::otap::OtapArrowRecords;
+    use prost::Message;
+    use weaver_common::result::WResult;
+    use weaver_common::vdir::VirtualDirectoryPath;
+    use weaver_forge::registry::ResolvedRegistry;
+    use weaver_resolver::SchemaResolver;
+    use weaver_semconv::registry::SemConvRegistry;
+    use weaver_semconv::registry_repo::RegistryRepo;
+
+    use crate::fake_data_generator::fake_signal::fake_otlp_logs;
+    use crate::pdata::{OtapPayload, OtlpProtoBytes};
+
+    #[tokio::test]
+    async fn test_dump_fake_telemetry() {
+        let registry_path = "https://github.com/open-telemetry/semantic-conventions.git[model]";
+        let virtual_directory_path = VirtualDirectoryPath::try_from(registry_path.to_string()).unwrap();
+        let registry_repo = RegistryRepo::try_new("main", &virtual_directory_path).unwrap();
+
+        let semconv_specs = match SchemaResolver::load_semconv_specs(
+            &registry_repo,
+            true, 
+            false
+        ) {
+            WResult::Ok(resolved_schema) => resolved_schema,
+            WResult::OkWithNFEs(resolved_schema, _) => resolved_schema,
+            WResult::FatalErr(e) => panic!("{e:?}")
+        };
+
+        let mut registry = SemConvRegistry::from_semconv_specs(&registry_repo, semconv_specs).unwrap();
+
+        let resolved_schema =
+            match SchemaResolver::resolve_semantic_convention_registry(&mut registry, true) {
+                WResult::Ok(resolved_schema) => resolved_schema,
+                WResult::OkWithNFEs(resolved_schema, _) => resolved_schema,
+                WResult::FatalErr(err) => panic!("{err:?}")
+            };
+
+        let resolved_registry = ResolvedRegistry::try_from_resolved_registry(
+            &resolved_schema.registry,
+            resolved_schema.catalog()
+        ).unwrap();
+
+        let logs = fake_otlp_logs(10000, &resolved_registry);
+        let mut log_bytes = vec![];
+        logs.encode(&mut log_bytes).unwrap();
+
+        let otap_pdata = OtapPayload::OtlpBytes(OtlpProtoBytes::ExportLogsRequest(log_bytes));
+        let otap_arrow_records: OtapArrowRecords = otap_pdata.try_into().unwrap();
+
+        for payload_type in otap_arrow_records.allowed_payload_types() {
+            if let Some(rb) = otap_arrow_records.get(*payload_type) {
+                let file_name = format!("/tmp/{:?}.arrow", payload_type).to_ascii_lowercase();
+                let file = File::create(file_name).unwrap();
+                let mut writer = FileWriter::try_new(file, rb.schema_ref()).unwrap();
+                writer.write(rb).unwrap();
+                writer.finish().unwrap();
+            }
+        }
+    }
+}
