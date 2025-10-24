@@ -112,6 +112,14 @@ impl LogFilter {
         let (exclude_resource_attr_filter, exclude_log_record_filter, exclude_log_attr_filter) =
             self.exclude.create_filters(&logs_payload, true)?;
 
+        // println!("include_res_filter = {:?}", include_resource_attr_filter);
+        // println!("include_attrs_filter = {:?}", include_log_attr_filter);
+        // println!("include_filter = {:?}", include_log_record_filter);
+
+        // println!("exclude_res_filter = {:?}", exclude_resource_attr_filter);
+        // println!("exclude_attrs_filter = {:?}", exclude_log_attr_filter);
+        // println!("exclude_filter = {:?}", exclude_log_record_filter);
+
         // combine the include and exclude filters
         let resource_attr_filter = arrow::compute::and_kleene(
             &include_resource_attr_filter,
@@ -124,6 +132,11 @@ impl LogFilter {
         let log_attr_filter =
             arrow::compute::and_kleene(&include_log_attr_filter, &exclude_log_attr_filter)
                 .context(error::ColumnLengthMismatchSnafu)?;
+
+        // println!("res_filter = {:?}", resource_attr_filter);
+        // println!("attrs_filter = {:?}", log_attr_filter);
+        // println!("filter = {:?}", log_record_filter);
+
 
         let (resource_attr_filter, scope_attr_filter, log_record_filter, log_attr_filter) = self
             .sync_up_filters(
@@ -682,6 +695,8 @@ impl LogMatchProperties {
             filter = arrow::compute::and_kleene(&filter, &severity_numbers_filter)
                 .context(error::ColumnLengthMismatchSnafu)?;
         }
+
+        // println!("RETURINING LOG RECORD FILTER {:?}", filter);
         Ok(nulls_to_false(&filter))
     }
 
