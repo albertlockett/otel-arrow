@@ -10,6 +10,7 @@ pub mod datagen;
 
 pub mod error;
 
+mod attributes;
 mod common;
 mod consts;
 mod filter;

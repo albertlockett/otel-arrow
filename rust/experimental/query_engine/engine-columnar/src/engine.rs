@@ -7,19 +7,24 @@ use std::sync::Arc;
 use arrow::array::{RecordBatch, UInt16Array};
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::DataType;
+use async_trait::async_trait;
 use data_engine_expressions::{
     ConditionalDataExpression, DataExpression, LogicalExpression, MutableValueExpression,
     PipelineExpression, ScalarExpression, SetTransformExpression, StaticScalarExpression,
     StringValue, TransformExpression, ValueAccessor,
 };
 use datafusion::common::JoinType;
-use datafusion::execution::TaskContext;
+use datafusion::execution::context::QueryPlanner;
+use datafusion::execution::{SessionState, SessionStateBuilder, TaskContext, session_state};
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::select_expr::SelectExpr;
-use datafusion::logical_expr::{Expr, LogicalPlanBuilder, col};
+use datafusion::logical_expr::{
+    Expr, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode, col,
+};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::common::collect;
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
+use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use otel_arrow_rust::arrays::{
@@ -31,6 +36,7 @@ use otel_arrow_rust::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use otel_arrow_rust::schema::consts;
 use roaring::RoaringBitmap;
 
+use crate::attributes::filter::{AttributeFilterExecPlanner, AttributeFilterExtension};
 use crate::common::{AttributesIdentifier, ColumnAccessor, try_static_scalar_to_literal};
 use crate::consts::ROW_NUMBER_COL;
 use crate::consts::{ATTRIBUTES_FIELD_NAME, RESOURCES_FIELD_NAME, SCOPE_FIELD_NAME};
@@ -38,6 +44,41 @@ use crate::datasource::exec::UpdateDataSourceOptimizer;
 use crate::datasource::table_provider::OtapBatchTable;
 use crate::error::{Error, Result};
 use crate::filter::Filter;
+
+/// Custom [`QueryPlanner`] implementation that delegates to the default physical planner
+/// with any custom extensions loaded
+pub struct OtapQueryPlanner {
+    physical_planner: DefaultPhysicalPlanner,
+}
+
+impl OtapQueryPlanner {
+    fn new() -> Self {
+        Self {
+            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
+                AttributeFilterExecPlanner::new(),
+            )]),
+        }
+    }
+}
+
+impl std::fmt::Debug for OtapQueryPlanner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TODO OtapQueryPlanner debug")
+    }
+}
+
+#[async_trait]
+impl QueryPlanner for OtapQueryPlanner {
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+        session_state: &SessionState,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        self.physical_planner
+            .create_physical_plan(logical_plan, session_state)
+            .await
+    }
+}
 
 /// This is used to build a datafusion `LogicalPlan` from a [`PipelineExpression`]
 // TODO could add more descriptive comments
@@ -74,7 +115,16 @@ impl PipelinePlanBuilder {
             .with_repartition_windows(false)
             .with_repartition_aggregations(false)
             .with_repartition_sorts(false);
+
         let session_ctx = SessionContext::new_with_config(session_config);
+
+        // apply any patches to the session state
+        let session_state = SessionStateBuilder::new_from_existing(session_ctx.state())
+            // patch the query planner so our extensions get injected into the physical planning
+            .with_query_planner(Arc::new(OtapQueryPlanner::new()))
+            .build();
+
+        let session_ctx = SessionContext::new_with_state(session_state);
 
         let table_name = format!("{:?}", root_batch_payload_type).to_lowercase();
         let table = OtapBatchTable::new(root_batch_payload_type, root_rb.clone());
@@ -158,6 +208,12 @@ impl PipelinePlanBuilder {
 
         if let Some(join) = filter.join {
             plan = join.join_to_plan(plan)?;
+        }
+
+        if let Some(attr_filter) = filter.attr_filter {
+            plan = LogicalPlanBuilder::new(LogicalPlan::Extension(Extension {
+                node: Arc::new(AttributeFilterExtension::new(plan.build()?)),
+            }))
         }
 
         // update the current plan now that filters are applied

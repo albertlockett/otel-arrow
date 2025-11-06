@@ -353,6 +353,7 @@ impl<'a> Iterator for ProjectionIter<'a> {
     }
 }
 
+// TODO should just use the DefaultDisplayAs for this?
 impl DisplayAs for OtapDataSourceExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
         match t {

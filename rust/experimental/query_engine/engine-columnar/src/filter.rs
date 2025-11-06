@@ -14,6 +14,7 @@ use datafusion::scalar::ScalarValue;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use otel_arrow_rust::schema::consts;
 
+use crate::attributes::filter::{AttributeFilterExpr, AttributeFilterExtension};
 use crate::common::{
     AttributesIdentifier, ColumnAccessor, try_static_scalar_to_any_val_column,
     try_static_scalar_to_literal,
@@ -24,7 +25,11 @@ use crate::error::{Error, Result};
 
 pub struct Filter {
     pub(crate) filter_expr: Option<Expr>,
+
+    // TODO if we have attr filter, do we even need join ?
     pub(crate) join: Option<FilteringJoin>,
+
+    pub(crate) attr_filter: Option<AttributeFilterExpr>,
 }
 
 impl Filter {
@@ -64,7 +69,11 @@ impl Filter {
                     _ => None,
                 };
 
-                Ok(Self { filter_expr, join })
+                Ok(Self {
+                    filter_expr,
+                    join,
+                    attr_filter: None,
+                })
             }
 
             LogicalExpression::Or(or_expr) => Self::try_from_or_expr(plan_builder, or_expr).await,
@@ -92,11 +101,13 @@ impl Filter {
                                 ROW_NUMBER_COL,
                             ),
                         }),
+                        attr_filter: None,
                     })
                 } else {
                     Ok(Self {
                         filter_expr: not_filter.filter_expr.map(not),
                         join: None,
+                        attr_filter: None,
                     })
                 }
             }
@@ -192,6 +203,7 @@ impl Filter {
                             ROW_NUMBER_COL,
                         ),
                     }),
+                    attr_filter: None,
                 })
             }
 
@@ -224,6 +236,7 @@ impl Filter {
                             ROW_NUMBER_COL,
                         ),
                     }),
+                    attr_filter: None,
                 })
             }
 
@@ -256,6 +269,7 @@ impl Filter {
                             ROW_NUMBER_COL,
                         ),
                     }),
+                    attr_filter: None,
                 })
             }
 
@@ -263,14 +277,17 @@ impl Filter {
                 (Some(left_filter), Some(right_filter)) => Ok(Self {
                     filter_expr: Some(or(left_filter, right_filter)),
                     join: None,
+                    attr_filter: None,
                 }),
                 (Some(filter_expr), None) | (None, Some(filter_expr)) => Ok(Self {
                     filter_expr: Some(filter_expr),
                     join: None,
+                    attr_filter: None,
                 }),
                 _ => Ok(Self {
                     filter_expr: None,
                     join: None,
+                    attr_filter: None,
                 }),
             },
         }
@@ -319,6 +336,7 @@ impl Filter {
                                     lit(false),
                                 ])),
                                 join: None,
+                                attr_filter: None,
                             })
                         }
                     },
@@ -335,6 +353,7 @@ impl Filter {
                             Ok(Self {
                                 filter_expr: Some(binary_expr(left, operator, right)),
                                 join: None,
+                                attr_filter: None,
                             })
                         }
                     },
@@ -346,65 +365,72 @@ impl Filter {
                             ),
                         }),
                         BinaryArg::Literal(static_scalar) => {
-                            let attr_val_col_name =
-                                try_static_scalar_to_any_val_column(&static_scalar)?;
-
-                            let attrs_payload_type = match attrs_identifier {
-                                AttributesIdentifier::Root => {
-                                    match plan_builder.root_batch_payload_type()? {
-                                        ArrowPayloadType::Logs => ArrowPayloadType::LogAttrs,
-                                        ArrowPayloadType::Spans => ArrowPayloadType::SpanAttrs,
-                                        ArrowPayloadType::MultivariateMetrics
-                                        | ArrowPayloadType::UnivariateMetrics => {
-                                            ArrowPayloadType::MetricAttrs
-                                        }
-                                        _ => {
-                                            unreachable!("invalid root payload type")
-                                        }
-                                    }
-                                }
-                                AttributesIdentifier::NonRoot(payload_type) => payload_type,
-                            };
-                            let attrs_filter = plan_builder
-                                .scan_batch_plan(attrs_payload_type)
-                                .await?
-                                .filter(and(
-                                    binary_expr(
-                                        col(consts::ATTRIBUTE_KEY),
-                                        Operator::Eq,
-                                        lit(attr_key),
-                                    ),
-                                    binary_expr(
-                                        col(attr_val_col_name),
-                                        operator,
-                                        try_static_scalar_to_literal(&static_scalar)?,
-                                    ),
-                                ))?;
-
-                            let join_condition = match attrs_payload_type {
-                                ArrowPayloadType::ResourceAttrs => FilteringJoinCondition::Filter(
-                                    col(consts::RESOURCE)
-                                        .field(consts::ID)
-                                        .eq(col(consts::PARENT_ID)),
-                                ),
-                                ArrowPayloadType::ScopeAttrs => FilteringJoinCondition::Filter(
-                                    col(consts::SCOPE)
-                                        .field(consts::ID)
-                                        .eq(col(consts::PARENT_ID)),
-                                ),
-                                _ => FilteringJoinCondition::MatchingColumnPairs(
-                                    consts::ID,
-                                    consts::PARENT_ID,
-                                ),
-                            };
-                            Ok(Self {
+                            Ok(Filter {
                                 filter_expr: None,
-                                join: Some(FilteringJoin {
-                                    logical_plan: attrs_filter.build()?,
-                                    join_type: JoinType::LeftSemi,
-                                    condition: join_condition,
-                                }),
+                                join: None,
+                                attr_filter: Some(AttributeFilterExpr {}),
                             })
+
+                            // let attr_val_col_name =
+                            //     try_static_scalar_to_any_val_column(&static_scalar)?;
+
+                            // let attrs_payload_type = match attrs_identifier {
+                            //     AttributesIdentifier::Root => {
+                            //         match plan_builder.root_batch_payload_type()? {
+                            //             ArrowPayloadType::Logs => ArrowPayloadType::LogAttrs,
+                            //             ArrowPayloadType::Spans => ArrowPayloadType::SpanAttrs,
+                            //             ArrowPayloadType::MultivariateMetrics
+                            //             | ArrowPayloadType::UnivariateMetrics => {
+                            //                 ArrowPayloadType::MetricAttrs
+                            //             }
+                            //             _ => {
+                            //                 unreachable!("invalid root payload type")
+                            //             }
+                            //         }
+                            //     }
+                            //     AttributesIdentifier::NonRoot(payload_type) => payload_type,
+                            // };
+
+                            // let attrs_filter = plan_builder
+                            //     .scan_batch_plan(attrs_payload_type)
+                            //     .await?
+                            //     .filter(and(
+                            //         binary_expr(
+                            //             col(consts::ATTRIBUTE_KEY),
+                            //             Operator::Eq,
+                            //             lit(attr_key),
+                            //         ),
+                            //         binary_expr(
+                            //             col(attr_val_col_name),
+                            //             operator,
+                            //             try_static_scalar_to_literal(&static_scalar)?,
+                            //         ),
+                            //     ))?;
+
+                            // let join_condition = match attrs_payload_type {
+                            //     ArrowPayloadType::ResourceAttrs => FilteringJoinCondition::Filter(
+                            //         col(consts::RESOURCE)
+                            //             .field(consts::ID)
+                            //             .eq(col(consts::PARENT_ID)),
+                            //     ),
+                            //     ArrowPayloadType::ScopeAttrs => FilteringJoinCondition::Filter(
+                            //         col(consts::SCOPE)
+                            //             .field(consts::ID)
+                            //             .eq(col(consts::PARENT_ID)),
+                            //     ),
+                            //     _ => FilteringJoinCondition::MatchingColumnPairs(
+                            //         consts::ID,
+                            //         consts::PARENT_ID,
+                            //     ),
+                            // };
+                            // Ok(Self {
+                            //     filter_expr: None,
+                            //     join: Some(FilteringJoin {
+                            //         logical_plan: attrs_filter.build()?,
+                            //         join_type: JoinType::LeftSemi,
+                            //         condition: join_condition,
+                            //     }),
+                            // })
                         }
                     },
                 }
