@@ -13,6 +13,8 @@ arrow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true}
 datafusion = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
 prost = { workspace = true }
 roaring = { workspace = true }
 

@@ -86,7 +86,7 @@ impl QueryPlanner for OtapQueryPlanner {
 pub struct PipelinePlanBuilder {
     pub session_ctx: SessionContext,
     pub logical_plan: LogicalPlanBuilder,
-    batch: OtapArrowRecords,
+    pub batch: OtapArrowRecords,
 }
 
 impl PipelinePlanBuilder {
@@ -212,7 +212,10 @@ impl PipelinePlanBuilder {
 
         if let Some(attr_filter) = filter.attr_filter {
             plan = LogicalPlanBuilder::new(LogicalPlan::Extension(Extension {
-                node: Arc::new(AttributeFilterExtension::new(plan.build()?)),
+                node: Arc::new(AttributeFilterExtension::new(
+                    plan.build()?,
+                    attr_filter.attrs_batch,
+                )),
             }))
         }
 

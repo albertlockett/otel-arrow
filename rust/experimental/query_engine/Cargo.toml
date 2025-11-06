@@ -27,6 +27,8 @@ caseless = "0.2.2"
 chrono = "0.4.41"
 criterion = "0.7.0"
 datafusion = { version = "50.2", default-features = false}
+futures-core = { version = "0.3" }
+futures-util = { version = "0.3" }
 hex = "0.4.3"
 opentelemetry-proto = "0.31.0"
 pest = "2.8"

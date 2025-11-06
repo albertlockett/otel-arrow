@@ -25,6 +25,8 @@ use datafusion::physical_plan::{
 use otel_arrow_rust::otap::OtapArrowRecords;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 
+use crate::attributes::filter::AttributeFilterExec;
+
 /// Custom implementation of [`DataSource`] that allows the in-memory batch and projections to
 /// be updated at runtime. The intention is for this to be used by [`OtapBatchDataSource`] so it
 /// can update the current batch the physical plan will receive as input, without having to
@@ -455,6 +457,30 @@ impl PhysicalOptimizerRule for UpdateDataSourceOptimizer {
                     curr_batch_exec.payload_type
                 )))
             }
+        } else if let Some(attrs_filter) = plan.as_any().downcast_ref::<AttributeFilterExec>() {
+            let payload_type = attrs_filter.arrow_payload_type;
+            let curr_source = attrs_filter.source.clone();
+            let next_source = self.optimize(attrs_filter.source.clone(), _config)?;
+            let plan = if Arc::ptr_eq(&curr_source, &next_source) {
+                plan
+            } else {
+                // TODO is there any way to reuse the vec here?
+                plan.with_new_children(vec![next_source])?
+            };
+
+            if let Some(rb) = self.otap_batch.get(payload_type) {
+                // safety: we know what the type here is
+                let attrs_filter = plan
+                    .as_any()
+                    .downcast_ref::<AttributeFilterExec>()
+                    .expect("can downcast to the type");
+                attrs_filter.update_batch(rb.clone());
+            } else {
+                // TODO panic here
+                todo!("handle error updating attrs filter exec when batch is missing")
+            }
+
+            Ok(plan)
         } else if let Some(curr_hash_join) = plan.as_any().downcast_ref::<HashJoinExec>() {
             // [`HashJoinExec`] is a special case we need to handle. Internally, it keeps a future
             // of what the left-side of the join produces and this future is of a type that will

@@ -368,7 +368,14 @@ impl Filter {
                             Ok(Filter {
                                 filter_expr: None,
                                 join: None,
-                                attr_filter: Some(AttributeFilterExpr {}),
+                                attr_filter: Some(AttributeFilterExpr {
+                                    // TODO not have this hard-coded to log attrs
+                                    attrs_batch: plan_builder
+                                        .batch
+                                        .get(ArrowPayloadType::LogAttrs)
+                                        .unwrap()
+                                        .clone(),
+                                }),
                             })
 
                             // let attr_val_col_name =
