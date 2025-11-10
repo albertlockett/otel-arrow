@@ -3,11 +3,6 @@
 
 //! This module contains some custom datafusion plan steps & optimizer rules for filtering
 //! OTAP batches by attributes
-//!
-//! possibly evil things are happening in this module.
-//
-// TODO remove prior comment if these forbidden experiments turn out to be
-// less evil than intended
 
 use std::any::Any;
 use std::cmp::Ordering;
