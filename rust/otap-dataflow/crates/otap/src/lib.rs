@@ -94,6 +94,8 @@ pub mod object_store;
 #[cfg(feature = "experimental-tls")]
 pub mod tls_utils;
 
+pub mod promql_processor;
+
 /// Factory for OTAP-based pipeline
 #[pipeline_factory(OTAP, OtapPdata)]
 pub static OTAP_PIPELINE_FACTORY: PipelineFactory<OtapPdata> = build_factory();
