@@ -83,7 +83,15 @@ futures = "0.3.31"
 futures-core = "0.3"
 futures-channel = "0.3"
 futures-timer = "3.0"
+greptime_base_common = {path = "../../../greptimedb/src/common/base", package = "common-base"}
+greptimedb_catalog = { path = "../../../greptimedb/src/catalog", package = "catalog" }
+greptimedb_datatypes = { path = "../../../greptimedb/src/datatypes", package = "datatypes" }
+greptime_recordbatch_common = { path = "../../../greptimedb/src/common/recordbatch", package = "common-recordbatch" }
+greptimedb_query_common= { path = "../../../greptimedb/src/common/query", package = "common-query" }
 greptimedb_query = { path = "../../../greptimedb/src/query", package = "query" }
+greptimedb_session= { path = "../../../greptimedb/src/session", package = "session" }
+greptimedb_table = { path = "../../../greptimedb/src/table", package = "table" }
+
 http = "1.4"
 humantime = "2.3.0"
 humantime-serde = "1.1.1"

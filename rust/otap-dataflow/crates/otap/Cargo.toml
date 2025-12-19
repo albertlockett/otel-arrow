@@ -77,8 +77,16 @@ azure_core = { workspace = true, optional = true,  features = ["reqwest"] }
 ahash = { workspace = true, optional = true }
 
 # Promql processor dependencies
+datafusion = { workspace = true }
 promql-parser = { workspace = true }
+greptime_base_common = { workspace = true }
+greptimedb_catalog = { workspace = true }
+greptimedb_datatypes = { workspace = true }
+greptime_recordbatch_common = { workspace = true }
+greptimedb_query_common = { workspace = true }
 greptimedb_query = { workspace = true }
+greptimedb_session = { workspace = true }
+greptimedb_table = { workspace = true }
 
 # OpenTelemetry proto with tonic feature enabled
 opentelemetry-proto = { workspace = true, optional = true }
