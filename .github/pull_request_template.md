@@ -7,7 +7,7 @@ Replace with a brief summary of the change in this PR
 ## What issue does this PR close?
 
 <!--
-We highly recommend correlation of every PR to an issue
+We **highly recommend** correlation of every PR to an issue
 -->
 
 * Closes #NNN
