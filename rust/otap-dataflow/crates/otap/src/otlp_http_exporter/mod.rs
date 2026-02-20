@@ -798,6 +798,7 @@ mod test {
 
         let tokio_rt = Runtime::new().unwrap();
         let test_runtime = TestRuntime::<OtapPdata>::new();
+        let telemetry_registry_handle = test_runtime.metrics_registry();
         let (pipeline_ctx, exporter) = setup_exporter(&test_runtime, config);
         let (mut pdata_rx, server_cancellation_token) =
             run_server(&tokio_rt, &pipeline_ctx, &endpoint_addr);
@@ -914,6 +915,14 @@ mod test {
                     assert_eq!(ack_count, num_expected_pdatas);
 
                     server_cancellation_token.cancel();
+
+                    println!("gonna try accumulating metrics...");
+                    telemetry_registry_handle.visit_current_metrics(|desc, attrs, iter| {
+                        println!("desc = {:?}", desc);
+                        for v in iter {
+                            println!("v = {:?}", v)
+                        }
+                    });
                 })
             })
     }
