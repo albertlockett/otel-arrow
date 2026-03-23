@@ -6,6 +6,7 @@ use arrow::array::{
     PrimitiveArray, RecordBatch, StringArray, UInt16Array, UInt32Array,
 };
 use arrow::datatypes::{ArrowPrimitiveType, DataType, UInt8Type, UInt16Type};
+use arrow::util::bit_iterator::BitSliceIterator;
 use roaring::RoaringBitmap;
 
 use crate::arrays::get_required_array;
@@ -38,22 +39,52 @@ const ID_BITMAP_PAGE_WORDS: usize = 1024;
 /// while avoiding thrashing for pages that are used intermittently.
 const ID_BITMAP_PAGE_EVICTION_THRESHOLD: u64 = 16;
 
-/// A single page of the [`IdBitmap`], covering 65,536 IDs (8 KiB of bitmap data).
+// TODO - should rework this so BitMap page has a u16 bitmap type inside it?
+
+/// A single page of the [`IdBitmap`], covering 65,536 IDs (8 KiB of bitmap data). This sizing
+/// is intentional because it allows a single page to also be used as a bitmap for u16 IDs
+/// having to create any heap allocation as would be required to instantiate [`IdBitmap`].
 ///
 /// Each page tracks the generation in which it was last written, enabling the bitmap to evict
 /// pages that haven't been touched in several cycles.
-struct IdBitmapPage {
+///
+/// This is sized such that it can also be used as a stack allocated bitmap for u16 IDs
+pub struct BitmapPage {
     words: [u64; ID_BITMAP_PAGE_WORDS],
     last_used_generation: u64,
 }
 
-impl IdBitmapPage {
+impl BitmapPage {
     /// Creates a new zeroed page stamped with the given generation.
-    fn new(generation: u64) -> Self {
+    fn new_with_generation(generation: u64) -> Self {
         Self {
             words: [0u64; ID_BITMAP_PAGE_WORDS],
             last_used_generation: generation,
         }
+    }
+
+    /// Create new instance of self
+    pub fn new() -> Self {
+        Self::new_with_generation(0)
+    }
+
+    /// TODO comment
+    #[inline]
+    pub fn insert(&mut self, bit_idx: u16) {
+        let bit_idx = bit_idx as usize;
+        self.words[bit_idx / 64] |= 1 << (bit_idx % 64);
+    }
+
+    /// TODO comment
+    #[inline]
+    pub fn contains(&self, bit_idx: u16) -> bool {
+        let bit_idx = bit_idx as usize;
+        self.words[bit_idx / 64] & (1 << (bit_idx % 64)) != 0
+    }
+
+    /// TODO comment
+    pub fn valid_slices_iter<'a>(&'a self, len: usize) -> BitSliceIterator<'a> {
+        BitSliceIterator::new(bytemuck::bytes_of(&self.words), 0, len)
     }
 }
 
@@ -82,7 +113,7 @@ impl IdBitmapPage {
 /// This means pages that are used regularly (even intermittently) stay allocated, while pages
 /// from one-off anomalous batches are eventually freed.
 pub struct IdBitmap {
-    pages: Vec<Option<Box<IdBitmapPage>>>,
+    pages: Vec<Option<Box<BitmapPage>>>,
     generation: u64,
 }
 
@@ -116,22 +147,22 @@ impl IdBitmap {
 
     /// Returns the page index and bit position within the page for the given ID.
     #[inline]
-    const fn page_and_bit(id: u32) -> (usize, usize) {
+    const fn page_and_bit(id: u32) -> (usize, u16) {
         let page_idx = (id >> 16) as usize;
-        let bit_idx = (id & 0xFFFF) as usize;
+        let bit_idx = (id & 0xFFFF) as u16;
         (page_idx, bit_idx)
     }
 
     /// Ensures the page for the given page index exists, allocating it if necessary,
     /// and stamps it with the current generation.
     #[inline]
-    fn ensure_page(&mut self, page_idx: usize) -> &mut IdBitmapPage {
+    fn ensure_page(&mut self, page_idx: usize) -> &mut BitmapPage {
         if page_idx >= self.pages.len() {
             self.pages.resize_with(page_idx + 1, || None);
         }
         let generation = self.generation;
-        let page =
-            self.pages[page_idx].get_or_insert_with(|| Box::new(IdBitmapPage::new(generation)));
+        let page = self.pages[page_idx]
+            .get_or_insert_with(|| Box::new(BitmapPage::new_with_generation(generation)));
         page.last_used_generation = generation;
         page
     }
@@ -141,7 +172,7 @@ impl IdBitmap {
     pub fn insert(&mut self, id: u32) {
         let (page_idx, bit_idx) = Self::page_and_bit(id);
         let page = self.ensure_page(page_idx);
-        page.words[bit_idx / 64] |= 1 << (bit_idx % 64);
+        page.insert(bit_idx)
     }
 
     /// Returns `true` if the bitmap contains the given ID.
@@ -150,7 +181,7 @@ impl IdBitmap {
     pub fn contains(&self, id: u32) -> bool {
         let (page_idx, bit_idx) = Self::page_and_bit(id);
         match self.pages.get(page_idx) {
-            Some(Some(page)) => page.words[bit_idx / 64] & (1 << (bit_idx % 64)) != 0,
+            Some(Some(page)) => page.contains(bit_idx),
             _ => false,
         }
     }

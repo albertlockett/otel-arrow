@@ -1404,12 +1404,12 @@ fn try_upsert_column(
 #[cfg(test)]
 mod test {
     use arrow::{
-        array::{StringArray, UInt16Array},
+        array::{Array, DictionaryArray, Int64Array, StringArray, UInt16Array, UInt64Array},
         compute::{
             filter_record_batch,
             kernels::{cast, cmp::eq},
         },
-        datatypes::DataType,
+        datatypes::{DataType, UInt16Type},
     };
     use data_engine_kql_parser::{KqlParser, Parser};
     use otap_df_opl::parser::OplParser;
@@ -3853,5 +3853,51 @@ mod test {
             log_0.attributes,
             vec![KeyValue::new("x", AnyValue { value: None })]
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_attr_to_new_type_removed_dead_dict_values() {
+        let logs_data = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("x", AnyValue::new_string("y")),
+                    KeyValue::new("other_int", AnyValue::new_int(902)),
+                ])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![KeyValue::new("secret_number", AnyValue::new_int(514))])
+                .finish(),
+        ]);
+
+        let query = "logs | extend attributes[\"secret_number\"] = \"hidden\"";
+        let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
+        let mut pipeline = Pipeline::new(pipeline_expr);
+
+        let input = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
+
+        let input_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap();
+        assert!(input_attrs.column_by_name(consts::ATTRIBUTE_STR).is_some());
+
+        let result = pipeline.execute(input).await.unwrap();
+
+        let result_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
+        let int_col = result_attrs.column_by_name(consts::ATTRIBUTE_INT).unwrap();
+
+        let dict_arr = int_col
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt16Type>>()
+            .unwrap();
+
+        let dict_vals = dict_arr
+            .values()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let eq_redacted = eq(dict_vals, &Int64Array::new_scalar(514)).unwrap();
+        assert_eq!(eq_redacted.true_count(), 0);
+
+        // TODO - create a version of this test for the case where the values column is not
+        // dictionary encoded. We set the null buffer, but need to ensure we don't also set
+        // just take the values buffer.
     }
 }

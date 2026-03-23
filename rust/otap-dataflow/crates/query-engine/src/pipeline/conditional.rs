@@ -393,22 +393,31 @@ mod test {
         Pipeline,
         test::{exec_logs_pipeline, exec_metrics_pipeline, exec_traces_pipeline},
     };
+    use arrow::{
+        array::{ArrayAccessor, DictionaryArray, StringArray, UInt16Array},
+        compute::kernels::cmp::eq,
+        datatypes::{UInt16Type, Utf8Type},
+    };
     use data_engine_parser_abstractions::Parser;
     use otap_df_opl::parser::OplParser;
-    use otap_df_pdata::{
-        proto::opentelemetry::{
-            common::v1::{AnyValue, KeyValue},
-            logs::v1::LogRecord,
-            trace::v1::Span,
-        },
-        testing::round_trip::{to_metrics_data, to_traces_data},
-    };
     use otap_df_pdata::{
         proto::opentelemetry::{
             metrics::v1::Metric,
             trace::v1::{Status, span::SpanKind},
         },
         testing::round_trip::to_logs_data,
+    };
+    use otap_df_pdata::{
+        proto::{
+            OtlpProtoMessage,
+            opentelemetry::{
+                common::v1::{AnyValue, KeyValue},
+                logs::v1::LogRecord,
+                trace::v1::Span,
+            },
+        },
+        schema::consts,
+        testing::round_trip::{otlp_to_otap, to_metrics_data, to_traces_data},
     };
 
     use super::*;
@@ -802,5 +811,124 @@ mod test {
             result.resource_metrics[0].scope_metrics[0].metrics,
             expected
         )
+    }
+
+    #[tokio::test]
+    async fn dictionary_values_are_removed_after_concat() {
+        let input = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("password", AnyValue::new_string("red")),
+                    KeyValue::new("env", AnyValue::new_string("prod")),
+                ])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![KeyValue::new("env", AnyValue::new_string("prod"))])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("password", AnyValue::new_string("blue")),
+                    KeyValue::new("env", AnyValue::new_string("staging")),
+                ])
+                .finish(),
+        ]);
+
+        // in this pipeline we're trying to remove all the log lines where the env is "prod" and
+        // they have the "password" as an attribute. We expect the value of this attribute to
+        // no longer be present in the output record batch.
+        let query = r#"
+            logs | 
+                if (attributes["env"] == "prod") {
+                    where attributes["password"] == null
+                }
+            "#;
+
+        let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
+        let mut pipeline = Pipeline::new(pipeline_expr);
+
+        let input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
+        let result = pipeline.execute(input.clone()).await.unwrap();
+
+        // also just assert there are no attrs remaining
+        let attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
+        let str_col = attrs.column_by_name(consts::ATTRIBUTE_STR).unwrap();
+        println!("{:?}", str_col);
+
+        let dict_arr = str_col
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt16Type>>()
+            .unwrap();
+
+        let str_vals = dict_arr.downcast_dict::<StringArray>().unwrap();
+        assert_eq!(str_vals.value(0), "prod");
+        assert_eq!(str_vals.value(1), "blue");
+        assert_eq!(str_vals.value(2), "staging");
+
+        let vals = dict_arr
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let eq_redacted = eq(vals, &StringArray::new_scalar("red")).unwrap();
+        assert_eq!(eq_redacted.true_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dictionary_values_are_removed_after_concat_nested_attrs_pipeline() {
+        let input = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new(
+                        "maybe_sensitive",
+                        AnyValue::new_string("my_credit_card_number"),
+                    ),
+                    KeyValue::new("k1", AnyValue::new_string("v1")),
+                ])
+                .finish(),
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("maybe_sensitive", AnyValue::new_string("my_phone_number")),
+                    KeyValue::new("k1", AnyValue::new_string("v1")),
+                ])
+                .finish(),
+        ]);
+
+        // in this query, we're trying to remove any attribute that may be sensitive where the
+        // value is "my_credit_card_number". We expect the output not to have this attribute value
+        // in the record batch.
+        let query = r#"
+            logs | apply attributes {
+                if (key == "maybe_sensitive") {
+                    where value != "my_credit_card_number"
+                }
+            }"#;
+
+        let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
+        let mut pipeline = Pipeline::new(pipeline_expr);
+
+        let input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
+        let result = pipeline.execute(input.clone()).await.unwrap();
+
+        // also just assert there are no attrs remaining
+        let attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
+        let str_col = attrs.column_by_name(consts::ATTRIBUTE_STR).unwrap();
+
+        let dict_arr = str_col
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt16Type>>()
+            .unwrap();
+
+        let str_vals = dict_arr.downcast_dict::<StringArray>().unwrap();
+        assert_eq!(str_vals.value(0), "my_phone_number");
+        assert_eq!(str_vals.value(1), "v1");
+        assert_eq!(str_vals.value(2), "v1");
+
+        let vals = dict_arr
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let eq_redacted = eq(vals, &StringArray::new_scalar("my_credit_card_number")).unwrap();
+        assert_eq!(eq_redacted.true_count(), 0);
     }
 }
