@@ -50,7 +50,8 @@ const ID_BITMAP_PAGE_EVICTION_THRESHOLD: u64 = 16;
 ///
 /// This is sized such that it can also be used as a stack allocated bitmap for u16 IDs
 pub struct BitmapPage {
-    words: [u64; ID_BITMAP_PAGE_WORDS],
+    /// TODO
+    pub words: [u64; ID_BITMAP_PAGE_WORDS],
     last_used_generation: u64,
 }
 
@@ -80,6 +81,16 @@ impl BitmapPage {
     pub fn contains(&self, bit_idx: u16) -> bool {
         let bit_idx = bit_idx as usize;
         self.words[bit_idx / 64] & (1 << (bit_idx % 64)) != 0
+    }
+
+    /// TODO
+    #[inline]
+    pub fn set_count(&self, max_idx: u16) -> usize {
+        let max_word = (max_idx / 64 + 1) as usize;
+        self.words[0..max_word]
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum::<usize>()
     }
 
     /// TODO comment

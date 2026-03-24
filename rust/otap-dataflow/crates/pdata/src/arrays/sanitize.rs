@@ -25,9 +25,6 @@ use crate::otap::filter::BitmapPage;
 pub fn sanitize_record_batch(record_batch: &RecordBatch) -> Option<RecordBatch> {
     let mut columns = Cow::from(record_batch.columns());
 
-    println!("schema = {:#?}", record_batch.schema_ref());
-    arrow::util::pretty::print_batches(&[record_batch.clone()]).unwrap();
-
     for i in 0..record_batch.num_columns() {
         let column = record_batch.column(i);
         match column.data_type() {
@@ -80,43 +77,85 @@ where
 {
     // first determine which keys actually point to dictionary values
     let mut live_values_set = BitmapPage::new();
-    let mut live_values_count = 0;
-    let mut live_values_total_bytes = 0;
     let dict_values = dict_arr.values();
+    let dict_values_len = dict_values.len();
     let dict_keys = dict_arr.keys();
-    for key in dict_keys {
-        if let Some(key) = key {
-            let key = key.as_u16();
-            if !live_values_set.contains(key) {
+    if dict_keys.null_count() > 0 {
+        for (i, key) in dict_keys.iter().enumerate() {
+            if let Some(key) = key {
+                // let key = key.as_u16();
+                let key = key.as_u16();
                 live_values_set.insert(key);
-                live_values_count += 1;
-                live_values_total_bytes += dict_vals_byte_length(dict_values, key as usize);
-                if live_values_count >= dict_values.len() {
-                    // all the values are active, just return the original dict array
+
+                if i % dict_values_len == 0 {
+                    if live_values_set.set_count(dict_values_len as u16) >= dict_values_len {
+                        return None;
+                    }
+                }
+            }
+        }
+    } else {
+        // let mut pages = [0usize; 64];
+        // let mut bit_idx = [0usize; 64];
+
+        // let dict_values = dict_keys.values();
+
+        // for i in 0..dict_values.len() / 64 {
+        //     let offset = i * 64;
+        //     for j in 0..64 {
+        //         pages[j] = dict_values[offset + j].as_usize() / 64;
+        //     }
+        //     for j in 0..64 {
+        //         bit_idx[j] = dict_values[offset + j].as_usize() % 64;
+        //     }
+
+        //     for j in 0..64 {
+        //         live_values_set.words[pages[j]] |= 1 << bit_idx[j]
+        //     }
+        // }
+
+        // fast path with no nulls
+        for (i, key) in dict_keys.values().iter().enumerate() {
+            let key = key.as_u16();
+            live_values_set.insert(key);
+
+            if i % dict_values_len == 0 {
+                if live_values_set.set_count(dict_values_len as u16) >= dict_values_len {
                     return None;
                 }
             }
         }
     }
 
+    if live_values_set.set_count(dict_values_len as u16) >= dict_values_len {
+        return None;
+    }
+
+    // build remapped keys
+    let valid_ranges_iter = live_values_set.valid_slices_iter(dict_values.len());
+    let mut remapped_keys = vec![0; dict_values.len()];
+    let mut values_removed = 0;
+    let mut last_valid_range_end = 0;
+    for (start, end) in valid_ranges_iter {
+        if last_valid_range_end < start {
+            values_removed += start - last_valid_range_end;
+        }
+        for i in start..end {
+            remapped_keys[i] = i - values_removed
+        }
+        last_valid_range_end = end;
+    }
+
+    values_removed += dict_arr.len() - last_valid_range_end;
+    let new_vals_capacity = dict_vals_byte_length_with_removed(dict_values, values_removed);
+
     // build new values, and keep track of key remappings
     let dict_val_data = dict_values.to_data();
     let mut mutable_dict_val_data =
-        MutableArrayData::new(vec![&dict_val_data], false, live_values_total_bytes);
-    let mut remapped_keys = vec![0; dict_values.len()];
-    let mut rows_removed = 0;
-    let mut last_valid_range_end = 0;
+        MutableArrayData::new(vec![&dict_val_data], false, new_vals_capacity);
     let valid_ranges_iter = live_values_set.valid_slices_iter(dict_values.len());
     for (start, end) in valid_ranges_iter {
-        if last_valid_range_end < start {
-            rows_removed += start - last_valid_range_end;
-        }
-
         mutable_dict_val_data.extend(0, start, end);
-        for i in start..end {
-            remapped_keys[i] = i - rows_removed
-        }
-        last_valid_range_end = end;
     }
 
     // build remapped dictionary keys
@@ -132,13 +171,11 @@ where
     let new_keys = PrimitiveArray::<K>::new(new_keys_values, dict_keys.nulls().cloned());
     let new_values = make_array(mutable_dict_val_data.freeze());
 
-    println!("new keys = {:?}", new_keys);
-    println!("new values = {:?}", new_values);
     Some(DictionaryArray::new(new_keys, new_values))
 }
 
-fn dict_vals_byte_length(arr: &ArrayRef, index: usize) -> usize {
-    match arr.data_type() {
+fn dict_vals_byte_length_with_removed(arr: &ArrayRef, num_removed: usize) -> usize {
+    let byte_len = match arr.data_type() {
         DataType::UInt8 | DataType::Int8 => 1,
         DataType::UInt16 | DataType::Int16 => 2,
         DataType::UInt32 | DataType::Int32 | DataType::Float32 => 4,
@@ -149,24 +186,28 @@ fn dict_vals_byte_length(arr: &ArrayRef, index: usize) -> usize {
         | DataType::Duration(_) => 8,
         DataType::FixedSizeBinary(len) => *len as usize,
         DataType::Utf8 => {
-            let byte_arr = arr
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("can downcast to string arr");
-            byte_arr.value_length(index) as usize
+            // let byte_arr = arr
+            //     .as_any()
+            //     .downcast_ref::<StringArray>()
+            //     .expect("can downcast to string arr");
+            // byte_arr.value_length(index) as usize
+            1
         }
         DataType::Binary => {
-            let byte_arr = arr
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .expect("can downcast to binary arr");
-            byte_arr.value_length(index) as usize
+            // let byte_arr = arr
+            //     .as_any()
+            //     .downcast_ref::<BinaryArray>()
+            //     .expect("can downcast to binary arr");
+            // byte_arr.value_length(index) as usize
+            1
         }
 
         // other types aren't used in OTAP for dictionary types, but we return zero
         // here just to be defensive in case someone calls this with an invalid batch
         _ => 0,
-    }
+    };
+
+    (arr.len() - num_removed) * byte_len
 }
 
 // helper trait for making sanitize_dict generic over supported key types

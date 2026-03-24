@@ -14,10 +14,12 @@ use datafusion::config::ConfigOptions;
 use datafusion::execution::TaskContext;
 use datafusion::prelude::SessionContext;
 use otap_df_pdata::OtapArrowRecords;
+use otap_df_pdata::arrays::sanitize::sanitize_record_batch;
 use otap_df_pdata::otap::raw_batch_store::{
     LOGS_TYPE_MASK, METRICS_TYPE_MASK, POSITION_LOOKUP, RawBatchStore, TRACES_TYPE_MASK,
 };
 use otap_df_pdata::otap::transform::concatenate::concatenate;
+use otap_df_pdata::otap::transform::sanitize::sanitize_otap_batch;
 use otap_df_pdata::otap::{Logs, Metrics, OtapBatchStore, Traces};
 use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 
@@ -270,11 +272,17 @@ impl PipelineStage for ConditionalPipelineStage {
         }
 
         // reconstruct the result with the results of each branch
-        match otap_batch {
+        let mut otap_batch = match otap_batch {
             OtapArrowRecords::Logs(_) => concatenate_logs(&mut branch_results),
             OtapArrowRecords::Metrics(_) => concatenate_metrics(&mut branch_results),
             OtapArrowRecords::Traces(_) => concatenate_traces(&mut branch_results),
-        }
+        }?;
+
+        // sanitize the data before return - this removes any data that may no longer be referenced
+        // after the transformations have been applied.
+        // sanitize_otap_batch(&mut otap_batch);
+
+        Ok(otap_batch)
     }
 
     async fn execute_on_attributes(
@@ -377,9 +385,15 @@ impl PipelineStage for ConditionalPipelineStage {
         }
 
         // reconstruct the result by concatenating the record batches from all branches
-        let final_result = concatenate_attrs_record_batches(&mut branch_results)?;
+        let concatenated_batch = concatenate_attrs_record_batches(&mut branch_results)?;
 
-        Ok(final_result)
+        return Ok(concatenated_batch);
+        // let result = match sanitize_record_batch(&concatenated_batch) {
+        //     Some(sanitized) => sanitized,
+        //     None => concatenated_batch,
+        // };
+
+        // Ok(result)
     }
 
     fn supports_exec_on_attributes(&self) -> bool {
