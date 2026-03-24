@@ -16,6 +16,7 @@ use datafusion::physical_plan::common::collect;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 use otap_df_pdata::OtapArrowRecords;
+use otap_df_pdata::otap::transform::sanitize::sanitize_otap_batch;
 use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use std::sync::Arc;
 
@@ -306,6 +307,10 @@ impl Pipeline {
                 )
                 .await?;
         }
+
+        // sanitize the data before return - this removes any data that may no longer be referenced
+        // after the transformations have been applied
+        sanitize_otap_batch(&mut otap_batch);
 
         Ok(otap_batch)
     }
