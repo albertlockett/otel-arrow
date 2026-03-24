@@ -25,9 +25,6 @@ use crate::otap::filter::BitmapPage;
 pub fn sanitize_record_batch(record_batch: &RecordBatch) -> Option<RecordBatch> {
     let mut columns = Cow::from(record_batch.columns());
 
-    println!("schema = {:#?}", record_batch.schema_ref());
-    arrow::util::pretty::print_batches(&[record_batch.clone()]).unwrap();
-
     for i in 0..record_batch.num_columns() {
         let column = record_batch.column(i);
         match column.data_type() {
@@ -132,8 +129,6 @@ where
     let new_keys = PrimitiveArray::<K>::new(new_keys_values, dict_keys.nulls().cloned());
     let new_values = make_array(mutable_dict_val_data.freeze());
 
-    println!("new keys = {:?}", new_keys);
-    println!("new values = {:?}", new_values);
     Some(DictionaryArray::new(new_keys, new_values))
 }
 
