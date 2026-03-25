@@ -3,15 +3,16 @@
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, BooleanBuilder, DictionaryArray, Float64Array, Int64Array,
-    PrimitiveArray, RecordBatch, StringArray, UInt16Array, UInt32Array,
+    PrimitiveArray, RecordBatch, StringArray, StructArray, UInt16Array, UInt32Array,
 };
-use arrow::datatypes::{ArrowPrimitiveType, DataType, UInt8Type, UInt16Type};
-use arrow::util::bit_iterator::BitSliceIterator;
+use arrow::compute::filter_record_batch;
+use arrow::datatypes::{ArrowPrimitiveType, DataType, UInt8Type, UInt16Type, UInt32Type};
 use roaring::RoaringBitmap;
 
-use crate::arrays::get_required_array;
+use crate::arrays::{MaybeDictArrayAccessor, get_required_array};
 use crate::otap::OtapArrowRecords;
 use crate::otap::error::{Error, Result};
+use crate::otap::{Logs, Metrics, ParentPayloadType, Traces, parent_payload_type};
 use crate::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use crate::schema::consts;
 use arrow::buffer::BooleanBuffer;
@@ -39,52 +40,22 @@ const ID_BITMAP_PAGE_WORDS: usize = 1024;
 /// while avoiding thrashing for pages that are used intermittently.
 const ID_BITMAP_PAGE_EVICTION_THRESHOLD: u64 = 16;
 
-// TODO - should rework this so BitMap page has a u16 bitmap type inside it?
-
-/// A single page of the [`IdBitmap`], covering 65,536 IDs (8 KiB of bitmap data). This sizing
-/// is intentional because it allows a single page to also be used as a bitmap for u16 IDs
-/// having to create any heap allocation as would be required to instantiate [`IdBitmap`].
+/// A single page of the [`IdBitmap`], covering 65,536 IDs (8 KiB of bitmap data).
 ///
 /// Each page tracks the generation in which it was last written, enabling the bitmap to evict
 /// pages that haven't been touched in several cycles.
-///
-/// This is sized such that it can also be used as a stack allocated bitmap for u16 IDs
-pub struct BitmapPage {
+struct IdBitmapPage {
     words: [u64; ID_BITMAP_PAGE_WORDS],
     last_used_generation: u64,
 }
 
-impl BitmapPage {
+impl IdBitmapPage {
     /// Creates a new zeroed page stamped with the given generation.
-    fn new_with_generation(generation: u64) -> Self {
+    fn new(generation: u64) -> Self {
         Self {
             words: [0u64; ID_BITMAP_PAGE_WORDS],
             last_used_generation: generation,
         }
-    }
-
-    /// Create new instance of self
-    pub fn new() -> Self {
-        Self::new_with_generation(0)
-    }
-
-    /// TODO comment
-    #[inline]
-    pub fn insert(&mut self, bit_idx: u16) {
-        let bit_idx = bit_idx as usize;
-        self.words[bit_idx / 64] |= 1 << (bit_idx % 64);
-    }
-
-    /// TODO comment
-    #[inline]
-    pub fn contains(&self, bit_idx: u16) -> bool {
-        let bit_idx = bit_idx as usize;
-        self.words[bit_idx / 64] & (1 << (bit_idx % 64)) != 0
-    }
-
-    /// TODO comment
-    pub fn valid_slices_iter<'a>(&'a self, len: usize) -> BitSliceIterator<'a> {
-        BitSliceIterator::new(bytemuck::bytes_of(&self.words), 0, len)
     }
 }
 
@@ -113,7 +84,7 @@ impl BitmapPage {
 /// This means pages that are used regularly (even intermittently) stay allocated, while pages
 /// from one-off anomalous batches are eventually freed.
 pub struct IdBitmap {
-    pages: Vec<Option<Box<BitmapPage>>>,
+    pages: Vec<Option<Box<IdBitmapPage>>>,
     generation: u64,
 }
 
@@ -147,22 +118,22 @@ impl IdBitmap {
 
     /// Returns the page index and bit position within the page for the given ID.
     #[inline]
-    const fn page_and_bit(id: u32) -> (usize, u16) {
+    const fn page_and_bit(id: u32) -> (usize, usize) {
         let page_idx = (id >> 16) as usize;
-        let bit_idx = (id & 0xFFFF) as u16;
+        let bit_idx = (id & 0xFFFF) as usize;
         (page_idx, bit_idx)
     }
 
     /// Ensures the page for the given page index exists, allocating it if necessary,
     /// and stamps it with the current generation.
     #[inline]
-    fn ensure_page(&mut self, page_idx: usize) -> &mut BitmapPage {
+    fn ensure_page(&mut self, page_idx: usize) -> &mut IdBitmapPage {
         if page_idx >= self.pages.len() {
             self.pages.resize_with(page_idx + 1, || None);
         }
         let generation = self.generation;
-        let page = self.pages[page_idx]
-            .get_or_insert_with(|| Box::new(BitmapPage::new_with_generation(generation)));
+        let page =
+            self.pages[page_idx].get_or_insert_with(|| Box::new(IdBitmapPage::new(generation)));
         page.last_used_generation = generation;
         page
     }
@@ -172,7 +143,7 @@ impl IdBitmap {
     pub fn insert(&mut self, id: u32) {
         let (page_idx, bit_idx) = Self::page_and_bit(id);
         let page = self.ensure_page(page_idx);
-        page.insert(bit_idx)
+        page.words[bit_idx / 64] |= 1 << (bit_idx % 64);
     }
 
     /// Returns `true` if the bitmap contains the given ID.
@@ -181,7 +152,7 @@ impl IdBitmap {
     pub fn contains(&self, id: u32) -> bool {
         let (page_idx, bit_idx) = Self::page_and_bit(id);
         match self.pages.get(page_idx) {
-            Some(Some(page)) => page.contains(bit_idx),
+            Some(Some(page)) => page.words[bit_idx / 64] & (1 << (bit_idx % 64)) != 0,
             _ => false,
         }
     }
@@ -1089,7 +1060,7 @@ fn apply_filter(
         .get(payload_type)
         .ok_or_else(|| Error::RecordBatchNotFound { payload_type })?;
     let num_rows_before = record_batch.num_rows() as u64;
-    let filtered_record_batch = arrow::compute::filter_record_batch(record_batch, filter)
+    let filtered_record_batch = filter_record_batch(record_batch, filter)
         .map_err(|e| Error::ColumnLengthMismatch { source: e })?;
     let num_rows_removed = num_rows_before - (filtered_record_batch.num_rows() as u64);
     // safety: Removing rows from a valid payload should yield a valid payload
@@ -1463,6 +1434,418 @@ fn get_attr_filter(
     let ids = get_ids(parent_id_column, &attributes_filter)?;
     // build filter around the ids and return the filter
     build_id_filter(parent_id_column, ids)
+}
+
+// ---------------------------------------------------------------------------
+// OTAP batch filtering — applies a BooleanArray selection to the root record
+// batch and propagates the filter to all child batches using IdBitmap.
+// ---------------------------------------------------------------------------
+
+/// Resolves ID columns on parent batches and builds child selection vectors.
+///
+/// Generic over the ID column width (u16 or u32) used to relate parent and
+/// child `RecordBatch`es in OTAP.
+pub trait ChildBatchFilterIdHelper: ArrowPrimitiveType + Sized {
+    /// Return the ID column on the parent batch that corresponds to the given
+    /// child payload type.
+    fn get_id_col_from_parent(
+        parent_rb: &RecordBatch,
+        child_payload_type: ArrowPayloadType,
+    ) -> Result<Option<MaybeDictArrayAccessor<'_, PrimitiveArray<Self>>>>;
+
+    /// Build a selection vector for a child batch's `parent_id` column based
+    /// on which IDs are present in `id_bitmap`.
+    fn build_selection_vec(parent_ids: &ArrayRef, id_bitmap: &IdBitmap) -> Result<BooleanArray>;
+}
+
+impl ChildBatchFilterIdHelper for UInt16Type {
+    fn get_id_col_from_parent(
+        parent_rb: &RecordBatch,
+        child_payload_type: ArrowPayloadType,
+    ) -> Result<Option<MaybeDictArrayAccessor<'_, PrimitiveArray<Self>>>> {
+        match child_payload_type {
+            ArrowPayloadType::ResourceAttrs => parent_rb
+                .column_by_name(consts::RESOURCE)
+                .and_then(|arr| arr.as_any().downcast_ref::<StructArray>())
+                .and_then(|arr| arr.column_by_name(consts::ID)),
+            ArrowPayloadType::ScopeAttrs => parent_rb
+                .column_by_name(consts::SCOPE)
+                .and_then(|arr| arr.as_any().downcast_ref::<StructArray>())
+                .and_then(|arr| arr.column_by_name(consts::ID)),
+            _ => parent_rb.column_by_name(consts::ID),
+        }
+        .map(|id_col| {
+            id_col
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .ok_or_else(|| Error::Format {
+                    error: format!(
+                        "unexpected type for ID column: expected u16, found {}",
+                        id_col.data_type()
+                    ),
+                })
+                .map(MaybeDictArrayAccessor::Native)
+        })
+        .transpose()
+    }
+
+    fn build_selection_vec(parent_ids: &ArrayRef, id_bitmap: &IdBitmap) -> Result<BooleanArray> {
+        let uint16_array = parent_ids
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .ok_or_else(|| Error::Format {
+                error: format!(
+                    "unexpected type for parent_id column: expected u16, found {}",
+                    parent_ids.data_type()
+                ),
+            })?;
+        Ok(build_native_selection_vec(uint16_array, id_bitmap))
+    }
+}
+
+impl ChildBatchFilterIdHelper for UInt32Type {
+    fn get_id_col_from_parent(
+        parent_rb: &RecordBatch,
+        _child_payload_type: ArrowPayloadType,
+    ) -> Result<Option<MaybeDictArrayAccessor<'_, PrimitiveArray<Self>>>> {
+        parent_rb
+            .column_by_name(consts::ID)
+            .map(MaybeDictArrayAccessor::<PrimitiveArray<Self>>::try_new)
+            .transpose()
+            .map_err(|e| Error::Format {
+                error: format!("error resolving ID column: {e}"),
+            })
+    }
+
+    fn build_selection_vec(parent_ids: &ArrayRef, id_bitmap: &IdBitmap) -> Result<BooleanArray> {
+        match parent_ids.data_type() {
+            DataType::UInt32 => {
+                let uint32_array = parent_ids
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .ok_or_else(|| Error::Format {
+                        error: format!(
+                            "unexpected type for parent_id column: expected u32, found {}",
+                            parent_ids.data_type()
+                        ),
+                    })?;
+                Ok(build_native_selection_vec(uint32_array, id_bitmap))
+            }
+            DataType::Dictionary(_, _) => build_dict_u32_selection_vec(parent_ids, id_bitmap)
+                .map_err(|e| Error::Format {
+                    error: format!("error building dict selection vec: {e}"),
+                }),
+            _ => Err(Error::Format {
+                error: format!(
+                    "unexpected type for parent_id column: expected u32 or dictionary-encoded u32, found {}",
+                    parent_ids.data_type()
+                ),
+            }),
+        }
+    }
+}
+
+/// Filter child record batch rows whose `parent_id` references a parent that
+/// was removed by filtering the parent batch.
+///
+/// Reads the filtered parent from `output` to determine surviving IDs, reads
+/// the original child rows from `input`, and writes the filtered child into
+/// `output`.
+fn filter_child_batch<T: ChildBatchFilterIdHelper>(
+    input: &OtapArrowRecords,
+    output: &mut OtapArrowRecords,
+    child_payload_type: ArrowPayloadType,
+    id_bitmap: &mut IdBitmap,
+) -> Result<()>
+where
+    <T as ArrowPrimitiveType>::Native: Into<u32>,
+{
+    // Read the *filtered* parent from output to get surviving IDs.
+    let parent_rb = match parent_payload_type(child_payload_type) {
+        None => {
+            return Err(Error::Format {
+                error: "filter_child_batch called with root payload type".into(),
+            });
+        }
+        Some(ParentPayloadType::Root) => output.root_record_batch(),
+        Some(ParentPayloadType::NonRoot(parent_pt)) => output.get(parent_pt),
+    };
+
+    let parent_rb = match parent_rb {
+        Some(rb) => rb,
+        None => {
+            // Parent was fully filtered out — no child rows can survive.
+            return Ok(());
+        }
+    };
+
+    // Read the *original* child from input.
+    let child_rb = match input.get(child_payload_type) {
+        Some(rb) => rb,
+        None => return Ok(()),
+    };
+
+    let id_col = T::get_id_col_from_parent(parent_rb, child_payload_type)?.ok_or_else(|| {
+        Error::ColumnNotFound {
+            name: format!("id (for child {:?})", child_payload_type),
+        }
+    })?;
+
+    id_bitmap.populate(id_col.iter().flatten().map(|i| i.into()));
+    let child_parent_ids =
+        child_rb
+            .column_by_name(consts::PARENT_ID)
+            .ok_or_else(|| Error::ColumnNotFound {
+                name: consts::PARENT_ID.into(),
+            })?;
+
+    let child_selection_vec = T::build_selection_vec(child_parent_ids, id_bitmap)?;
+
+    if child_selection_vec.true_count() > 0 {
+        let new_child_rb = filter_record_batch(child_rb, &child_selection_vec)
+            .map_err(|source| Error::ColumnLengthMismatch { source })?;
+        output.set(child_payload_type, new_child_rb)?;
+    }
+
+    Ok(())
+}
+
+/// Apply a boolean selection vector to an OTAP batch, filtering both the root
+/// record batch and all child batches.
+///
+/// The `selection_vec` must have the same length as the root record batch's row
+/// count. Rows where the selection is `true` are kept; rows where it is `false`
+/// are dropped.
+///
+/// The input batch is borrowed; a new batch is returned with the filtered
+/// results. This allows the caller to retain the original data (e.g. for
+/// nacking on error).
+///
+/// An [`IdBitmapPool`] is used to efficiently propagate the filter to child
+/// batches via parent-child ID relationships.
+pub fn filter_otap_batch(
+    selection_vec: &BooleanArray,
+    otap_batch: &OtapArrowRecords,
+    pool: &mut IdBitmapPool,
+) -> Result<OtapArrowRecords> {
+    let root_batch = match otap_batch.root_record_batch() {
+        Some(rb) => rb,
+        None => return Ok(otap_batch.clone()),
+    };
+
+    // Fast path: nothing filtered — cheap clone (Arc-backed record batches)
+    if selection_vec.true_count() == root_batch.num_rows() {
+        return Ok(otap_batch.clone());
+    }
+
+    // Fast path: everything filtered — return empty storage
+    if selection_vec.false_count() == root_batch.num_rows() {
+        return Ok(match otap_batch.root_payload_type() {
+            ArrowPayloadType::Logs => OtapArrowRecords::Logs(Logs::default()),
+            ArrowPayloadType::Spans => OtapArrowRecords::Traces(Traces::default()),
+            _ => OtapArrowRecords::Metrics(Metrics::default()),
+        });
+    }
+
+    // Create new output storage of the same signal type.
+    let mut output = match otap_batch.root_payload_type() {
+        ArrowPayloadType::Logs => OtapArrowRecords::Logs(Logs::default()),
+        ArrowPayloadType::Spans => OtapArrowRecords::Traces(Traces::default()),
+        _ => OtapArrowRecords::Metrics(Metrics::default()),
+    };
+
+    // Filter the root batch into output.
+    let new_root_batch = filter_record_batch(root_batch, selection_vec)
+        .map_err(|source| Error::ColumnLengthMismatch { source })?;
+    output
+        .set(otap_batch.root_payload_type(), new_root_batch)
+        .expect("valid otap batch");
+
+    // Filter child batches using an IdBitmap from the pool.
+    // Reads original children from `otap_batch`, filtered parents from `output`.
+    let mut id_bitmap = pool.acquire();
+    let result = (|| -> Result<OtapArrowRecords> {
+        match otap_batch.root_payload_type() {
+            ArrowPayloadType::Logs => {
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::LogAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ScopeAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ResourceAttrs,
+                    &mut id_bitmap,
+                )?;
+            }
+            ArrowPayloadType::Spans => {
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::SpanAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ScopeAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ResourceAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::SpanEvents,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::SpanEventAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::SpanLinks,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::SpanLinkAttrs,
+                    &mut id_bitmap,
+                )?;
+            }
+            ArrowPayloadType::UnivariateMetrics | ArrowPayloadType::MultivariateMetrics => {
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::MetricAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ScopeAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ResourceAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::SummaryDataPoints,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::SummaryDpAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::NumberDataPoints,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::NumberDpAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::NumberDpExemplars,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::NumberDpExemplarAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::HistogramDataPoints,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::HistogramDpAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::HistogramDpExemplars,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::HistogramDpExemplarAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt16Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ExpHistogramDataPoints,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ExpHistogramDpAttrs,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ExpHistogramDpExemplars,
+                    &mut id_bitmap,
+                )?;
+                filter_child_batch::<UInt32Type>(
+                    otap_batch,
+                    &mut output,
+                    ArrowPayloadType::ExpHistogramDpExemplarAttrs,
+                    &mut id_bitmap,
+                )?;
+            }
+            signal_type => {
+                return Err(Error::Format {
+                    error: format!(
+                        "signal type {signal_type:?} not yet supported by filter_otap_batch"
+                    ),
+                });
+            }
+        };
+        Ok(output)
+    })();
+    pool.release(id_bitmap);
+    result
 }
 
 #[cfg(test)]

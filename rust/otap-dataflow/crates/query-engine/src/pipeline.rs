@@ -308,10 +308,6 @@ impl Pipeline {
                 .await?;
         }
 
-        // sanitize the data before return - this removes any data that may no longer be referenced
-        // after the transformations have been applied
-        sanitize_otap_batch(&mut otap_batch);
-
         Ok(otap_batch)
     }
 

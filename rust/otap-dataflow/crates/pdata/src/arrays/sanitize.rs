@@ -10,18 +10,13 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow::{
-    array::{
-        Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, MutableArrayData,
-        PrimitiveArray, RecordBatch, StringArray, make_array,
-    },
+    array::{Array, BooleanArray, DictionaryArray, PrimitiveArray, RecordBatch},
     buffer::ScalarBuffer,
     compute::kernels::filter::filter,
     datatypes::{ArrowDictionaryKeyType, ArrowNativeType, UInt8Type, UInt16Type},
     util::{bit_iterator::BitSliceIterator, bit_util},
 };
 use arrow_schema::DataType;
-
-use crate::otap::filter::BitmapPage;
 
 /// sanitize all columns in the
 pub fn sanitize_record_batch(record_batch: &RecordBatch) -> Option<RecordBatch> {
@@ -35,6 +30,7 @@ pub fn sanitize_record_batch(record_batch: &RecordBatch) -> Option<RecordBatch> 
                     let dict_arr = column
                         .as_any()
                         .downcast_ref::<DictionaryArray<UInt8Type>>()
+                        // safety: we've checked the type
                         .expect("can downcast to dict");
                     if let Some(sanitized) = sanitized_dict(dict_arr) {
                         columns.to_mut()[i] = Arc::new(sanitized)
@@ -44,6 +40,7 @@ pub fn sanitize_record_batch(record_batch: &RecordBatch) -> Option<RecordBatch> 
                     let dict_arr = column
                         .as_any()
                         .downcast_ref::<DictionaryArray<UInt16Type>>()
+                        // safety: we've checked the type
                         .expect("can downcast to dict");
                     if let Some(sanitized) = sanitized_dict(dict_arr) {
                         columns.to_mut()[i] = Arc::new(sanitized)
@@ -84,7 +81,6 @@ where
     // first determine which dictionary values are live (e.g. those with keys that reference them)
     let mut live_values_set = vec![0u8; bit_util::ceil(dict_values_len, 8)];
     let mut live_values_count = 0;
-    let mut live_values_total_bytes = 0;
 
     // helper closure to set a value in the live values set. It also returns `true` if this
     // function can return early because it has determined that all dict values are live
@@ -101,10 +97,11 @@ where
 
     // go through the valid (non-null) ranges from the dictionary keys, marking which values are
     // live while trying to return early if all are live ...
+    let dict_key_values_buffer = dict_keys.values();
     if let Some(nulls) = dict_keys.nulls() {
         for (start, end) in nulls.valid_slices() {
             for i in start..end {
-                let all_values_live = set_value_live(i);
+                let all_values_live = set_value_live(dict_key_values_buffer[i].as_usize());
                 if all_values_live {
                     return None;
                 }
@@ -112,7 +109,7 @@ where
         }
     } else {
         for i in 0..dict_keys.len() {
-            let all_values_live = set_value_live(i);
+            let all_values_live = set_value_live(dict_key_values_buffer[i].as_usize());
             if all_values_live {
                 return None;
             }
@@ -150,65 +147,26 @@ where
         dict_values,
         &BooleanArray::new_from_packed(live_values_set, 0, dict_values_len),
     )
-    .expect("TODO why can we expect?");
+    // safety: this will only return error here if our selection vec is the wrong length, but since
+    // we're explicitly passing a boolean array with the same length as the array being filtered,
+    // this can be considered safe
+    .expect("can filter");
 
     Some(DictionaryArray::new(new_keys, new_values))
 }
 
-fn dict_vals_byte_length(arr: &ArrayRef, index: usize) -> usize {
-    match arr.data_type() {
-        DataType::UInt8 | DataType::Int8 => 1,
-        DataType::UInt16 | DataType::Int16 => 2,
-        DataType::UInt32 | DataType::Int32 | DataType::Float32 => 4,
-        DataType::UInt64
-        | DataType::Int64
-        | DataType::Float64
-        | DataType::Timestamp(_, _)
-        | DataType::Duration(_) => 8,
-        DataType::FixedSizeBinary(len) => *len as usize,
-        DataType::Utf8 => {
-            let byte_arr = arr
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("can downcast to string arr");
-            byte_arr.value_length(index) as usize
-        }
-        DataType::Binary => {
-            let byte_arr = arr
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .expect("can downcast to binary arr");
-            byte_arr.value_length(index) as usize
-        }
-
-        // other types aren't used in OTAP for dictionary types, but we return zero
-        // here just to be defensive in case someone calls this with an invalid batch
-        _ => 0,
-    }
-}
-
 // helper trait for making sanitize_dict generic over supported key types
 trait SanitizeDictHelper {
-    fn as_u16(&self) -> u16;
-
     fn from_usize(val: usize) -> Self;
 }
 
 impl SanitizeDictHelper for u8 {
-    fn as_u16(&self) -> u16 {
-        *self as u16
-    }
-
     fn from_usize(val: usize) -> Self {
         val as Self
     }
 }
 
 impl SanitizeDictHelper for u16 {
-    fn as_u16(&self) -> u16 {
-        *self
-    }
-
     fn from_usize(val: usize) -> Self {
         val as Self
     }

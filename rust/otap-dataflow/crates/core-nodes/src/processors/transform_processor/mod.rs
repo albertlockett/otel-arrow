@@ -38,7 +38,9 @@ use otap_df_otap::{
     accessory::slots::Key,
     pdata::{Context, OtapPdata},
 };
-use otap_df_pdata::{OtapArrowRecords, OtapPayload};
+use otap_df_pdata::{
+    OtapArrowRecords, OtapPayload, otap::transform::sanitize::sanitize_otap_batch,
+};
 use otap_df_query_engine::pipeline::{Pipeline, routing::RouterExtType, state::ExecutionState};
 use otap_df_telemetry::metrics::MetricSet;
 use serde_json::Value;
@@ -65,6 +67,7 @@ pub struct TransformProcessor {
     signal_scope: SignalScope,
     contexts: Contexts,
     metrics: MetricSet<Metrics>,
+    sanitize_results: bool,
 }
 
 /// Identifier for which signal types the transformation pipeline should be applied.
@@ -135,6 +138,7 @@ impl TransformProcessor {
             metrics: pipeline_ctx.register_metrics::<Metrics>(),
             contexts: Contexts::new(config.inbound_request_limit, config.outbound_request_limit),
             execution_state,
+            sanitize_results: !config.skip_sanitize_result,
         })
     }
 
@@ -167,7 +171,7 @@ impl TransformProcessor {
 
         // access the batch that was the output of the call to pipeline.execute. This should
         // eventually be sent on the default output port
-        let default_otap_batch = match pipeline_result {
+        let mut default_otap_batch = match pipeline_result {
             Ok(otap_batch) => otap_batch,
             Err(e) => {
                 // clear any batches that are in the buffer to be routed, as the pipeline failed
@@ -176,6 +180,10 @@ impl TransformProcessor {
                 return Err(e);
             }
         };
+
+        if self.sanitize_results {
+            sanitize_otap_batch(&mut default_otap_batch);
+        }
 
         // TODO - there's probably some optimization we can make below where if there's only one
         // non-empty batch to be output, we don't need to change any contexts or subscriptions
@@ -237,7 +245,7 @@ impl TransformProcessor {
 
         // handle any batches that need to be forwarded to a specific output port thanks to invocation
         // of a "route_to" operator call
-        for (route_name, otap_batch) in router_impl.routed.drain(..) {
+        for (route_name, mut otap_batch) in router_impl.routed.drain(..) {
             // Find the port name that matches the route name.
             let port_name = effect_handler
                 .connected_ports()
@@ -250,6 +258,10 @@ impl TransformProcessor {
                     source_detail: format!("output port name {} not configured", route_name),
                 })?
                 .clone();
+
+            if self.sanitize_results {
+                sanitize_otap_batch(&mut otap_batch);
+            }
 
             // setup the pdata with the new outbound context
             let payload = OtapPayload::OtapArrowRecords(otap_batch);
