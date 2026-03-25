@@ -11,11 +11,13 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        Array, ArrayRef, BinaryArray, DictionaryArray, MutableArrayData, PrimitiveArray,
-        RecordBatch, StringArray, make_array,
+        Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, MutableArrayData,
+        PrimitiveArray, RecordBatch, StringArray, make_array,
     },
     buffer::ScalarBuffer,
+    compute::kernels::filter::filter,
     datatypes::{ArrowDictionaryKeyType, ArrowNativeType, UInt8Type, UInt16Type},
+    util::{bit_iterator::BitSliceIterator, bit_util},
 };
 use arrow_schema::DataType;
 
@@ -75,41 +77,57 @@ fn sanitized_dict<K: ArrowDictionaryKeyType>(
 where
     K::Native: SanitizeDictHelper,
 {
-    // first determine which keys actually point to dictionary values
-    let mut live_values_set = BitmapPage::new();
+    let dict_values = dict_arr.values();
+    let dict_values_len = dict_values.len();
+    let dict_keys = dict_arr.keys();
+
+    // first determine which dictionary values are live (e.g. those with keys that reference them)
+    let mut live_values_set = vec![0u8; bit_util::ceil(dict_values_len, 8)];
     let mut live_values_count = 0;
     let mut live_values_total_bytes = 0;
-    let dict_values = dict_arr.values();
-    let dict_keys = dict_arr.keys();
-    for key in dict_keys {
-        if let Some(key) = key {
-            let key = key.as_u16();
-            if !live_values_set.contains(key) {
-                live_values_set.insert(key);
-                live_values_count += 1;
-                live_values_total_bytes += dict_vals_byte_length(dict_values, key as usize);
-                if live_values_count >= dict_values.len() {
-                    // all the values are active, just return the original dict array
+
+    // helper closure to set a value in the live values set. It also returns `true` if this
+    // function can return early because it has determined that all dict values are live
+    let mut set_value_live = |i: usize| {
+        if !bit_util::get_bit(&live_values_set, i) {
+            bit_util::set_bit(&mut live_values_set, i);
+            live_values_count += 1;
+            if live_values_count >= dict_values_len {
+                return true;
+            }
+        }
+        false
+    };
+
+    // go through the valid (non-null) ranges from the dictionary keys, marking which values are
+    // live while trying to return early if all are live ...
+    if let Some(nulls) = dict_keys.nulls() {
+        for (start, end) in nulls.valid_slices() {
+            for i in start..end {
+                let all_values_live = set_value_live(i);
+                if all_values_live {
                     return None;
                 }
             }
         }
+    } else {
+        for i in 0..dict_keys.len() {
+            let all_values_live = set_value_live(i);
+            if all_values_live {
+                return None;
+            }
+        }
     }
 
-    // build new values, and keep track of key remappings
-    let dict_val_data = dict_values.to_data();
-    let mut mutable_dict_val_data =
-        MutableArrayData::new(vec![&dict_val_data], false, live_values_total_bytes);
+    // build dictionary key remapping
     let mut remapped_keys = vec![0; dict_values.len()];
     let mut rows_removed = 0;
     let mut last_valid_range_end = 0;
-    let valid_ranges_iter = live_values_set.valid_slices_iter(dict_values.len());
-    for (start, end) in valid_ranges_iter {
+    for (start, end) in BitSliceIterator::new(&live_values_set, 0, dict_values_len) {
         if last_valid_range_end < start {
             rows_removed += start - last_valid_range_end;
         }
 
-        mutable_dict_val_data.extend(0, start, end);
         for i in start..end {
             remapped_keys[i] = i - rows_removed
         }
@@ -124,10 +142,15 @@ where
             new_keys[i] = <K::Native as SanitizeDictHelper>::from_usize(new_key);
         }
     }
-
     let new_keys_values = ScalarBuffer::from(new_keys);
     let new_keys = PrimitiveArray::<K>::new(new_keys_values, dict_keys.nulls().cloned());
-    let new_values = make_array(mutable_dict_val_data.freeze());
+
+    // take only the live values
+    let new_values = filter(
+        dict_values,
+        &BooleanArray::new_from_packed(live_values_set, 0, dict_values_len),
+    )
+    .expect("TODO why can we expect?");
 
     Some(DictionaryArray::new(new_keys, new_values))
 }
