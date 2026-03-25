@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrow::array::{
-    Array, RecordBatch, StructArray, TimestampNanosecondArray, UInt16Array, UInt32Array,
+    Array, Int32Array, RecordBatch, StructArray, TimestampNanosecondArray, UInt16Array,
+    UInt32Array, UInt64Array,
 };
+use arrow::compute::{rank, sort_to_indices, take};
 use arrow::datatypes::{DataType, Fields};
 
 use crate::arrays::{
@@ -225,6 +227,8 @@ impl ProtoBytesEncoder for LogsProtoBytesEncoder {
         self.batch_sorter
             .init_cursor_for_root_batch(logs_rb, &mut self.root_cursor)?;
 
+        println!("self.root_cursor = {:?}", self.root_cursor);
+
         // get the lists of child indices for attributes to visit in oder:
         if let Some(res_attrs) = logs_data_arrays.resource_attrs.as_ref() {
             self.batch_sorter.init_cursor_for_u16_id_column(
@@ -236,6 +240,43 @@ impl ProtoBytesEncoder for LogsProtoBytesEncoder {
             self.batch_sorter.init_cursor_for_u16_id_column(
                 &scope_attrs.parent_id,
                 &mut self.scope_attrs_cursor,
+            );
+
+            println!("self.scope_attrs_cursor = {:?}", self.scope_attrs_cursor);
+
+            let indices1 = Int32Array::from_iter_values(
+                self.scope_attrs_cursor
+                    .sorted_indices
+                    .iter()
+                    .map(|i| *i as i32),
+            );
+            let ids = logs_data_arrays.scope_arrays.id.unwrap();
+            let ids_in_visit_order = take(&ids, &indices1, None).unwrap();
+            println!("ids_in_visit_order {:?}", ids_in_visit_order);
+            let ranked = rank(&ids_in_visit_order, None).unwrap();
+            println!("ranked {:?}", ranked);
+
+            let new_sorted_indices = take(
+                &UInt64Array::from_iter_values(
+                    self.scope_attrs_cursor
+                        .sorted_indices
+                        .iter()
+                        .map(|i| *i as u64),
+                ),
+                &UInt32Array::from_iter_values(ranked.iter().map(|i| i - 1)),
+                None,
+            )
+            .unwrap();
+            self.scope_attrs_cursor.sorted_indices = new_sorted_indices
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .iter()
+                .map(|i| i.unwrap() as usize)
+                .collect::<Vec<_>>();
+            println!(
+                "after self.scope_attrs_cursor = {:?}",
+                self.scope_attrs_cursor
             );
         }
         if let Some(log_attrs) = logs_data_arrays.log_attrs.as_ref() {
@@ -906,5 +947,93 @@ mod test {
             )],
         )]);
         assert_eq!(result, expected);
+    }
+}
+
+#[cfg(test)]
+mod test2 {
+    use crate::otap::OtapBatchStore;
+    use crate::otlp::ProtoBytesEncoder;
+    use crate::record_batch;
+    use crate::{
+        OtapArrowRecords,
+        otlp::{ProtoBuffer, logs::LogsProtoBytesEncoder},
+        proto::opentelemetry::{
+            common::v1::{AnyValue, KeyValue},
+            logs::v1::LogsData,
+        },
+    };
+    use prost::Message;
+
+    #[test]
+    fn test_proto_encode_nonmonotonic_scope_ids_across_resources() {
+        use crate::logs;
+
+        // Build an otap batch where:
+        //
+        //   Row 0: resource_id=0, scope_id=5   (high scope_id in first resource)
+        //   Row 1: resource_id=1, scope_id=2   (low scope_id in second resource)
+        //   Row 2: resource_id=1, scope_id=3   (another low scope_id in second resource)
+        //
+        // After sorting by (resource_id, scope_id), visit order is rows [0, 1, 2]
+        // with scope_ids visited: [5, 2, 3] - non-monotonic at the 5 -> 2 boundary.
+        let str_type = 1u8; // AttributeValueType::Str
+        #[rustfmt::skip]
+        let mut otap_batch: OtapArrowRecords = logs!(
+            (Logs,
+                ("id", UInt16, vec![0u16, 1, 2]),
+                ("resource.id", UInt16, vec![0u16, 1, 1]),
+                ("scope.id", UInt16, vec![5u16, 2, 3]),
+                ("scope.name", Utf8, vec!["scope-five", "scope-two", "scope-three"])),
+            (ScopeAttrs,
+                ("parent_id", UInt16, vec![2u16, 3, 5]),
+                ("type", UInt8, vec![str_type, str_type, str_type]),
+                ("key", Utf8, vec!["sk", "sk", "sk"]),
+                ("str", Utf8, vec!["scope2-attr", "scope3-attr", "scope5-attr"])),
+        ).into();
+
+        let mut result_buf = ProtoBuffer::new();
+        let mut encoder = LogsProtoBytesEncoder::new();
+        encoder.encode(&mut otap_batch, &mut result_buf).unwrap();
+
+        let result = LogsData::decode(result_buf.as_ref()).unwrap();
+
+        println!("result {:#?}", result);
+
+        // Resource 0 should have one scope ("scope-five") with attribute sk=scope5-attr
+        // Resource 1 should have two scopes:
+        //   "scope-two"   with attribute sk=scope2-attr
+        //   "scope-three" with attribute sk=scope3-attr
+        assert_eq!(result.resource_logs.len(), 2);
+
+        let res0 = &result.resource_logs[0];
+        assert_eq!(res0.scope_logs.len(), 1);
+        assert_eq!(
+            res0.scope_logs[0].scope.as_ref().unwrap().name,
+            "scope-five"
+        );
+        assert_eq!(
+            res0.scope_logs[0].scope.as_ref().unwrap().attributes,
+            vec![KeyValue::new("sk", AnyValue::new_string("scope5-attr"))],
+            "scope-five should have its scope attribute"
+        );
+
+        let res1 = &result.resource_logs[1];
+        assert_eq!(res1.scope_logs.len(), 2);
+        assert_eq!(res1.scope_logs[0].scope.as_ref().unwrap().name, "scope-two");
+        assert_eq!(
+            res1.scope_logs[0].scope.as_ref().unwrap().attributes,
+            vec![KeyValue::new("sk", AnyValue::new_string("scope2-attr"))],
+            "scope-two should have its scope attribute (not dropped by non-monotonic cursor)"
+        );
+        assert_eq!(
+            res1.scope_logs[1].scope.as_ref().unwrap().name,
+            "scope-three"
+        );
+        assert_eq!(
+            res1.scope_logs[1].scope.as_ref().unwrap().attributes,
+            vec![KeyValue::new("sk", AnyValue::new_string("scope3-attr"))],
+            "scope-three should have its scope attribute (not dropped by non-monotonic cursor)"
+        );
     }
 }

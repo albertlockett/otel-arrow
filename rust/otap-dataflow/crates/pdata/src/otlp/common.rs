@@ -208,6 +208,11 @@ pub(crate) fn proto_encode_instrumentation_scope(
 
     if let Some(attr_arrays) = scope_attrs_arrays {
         if let Some(scope_id) = scope_arrays.id.value_at(index) {
+            println!("scope ID = {:?}", scope_id);
+            if let MaybeDictArrayAccessor::Native(n) = attr_arrays.parent_id {
+                println!("parent_id = {:?}", n);
+            }
+            println!("scope_attrs_cursor = {:?}", scope_attrs_cursor);
             for attr_index in
                 ChildIndexIter::new(scope_id, &attr_arrays.parent_id, scope_attrs_cursor)
             {
@@ -547,7 +552,7 @@ pub fn patch_len_placeholder(
 /// initialize this than sorting the entire [`RecordBatch`].
 #[derive(Debug)]
 pub(crate) struct SortedBatchCursor {
-    sorted_indices: Vec<usize>,
+    pub sorted_indices: Vec<usize>,
     curr_index: usize,
 }
 
@@ -771,6 +776,7 @@ pub(crate) struct ChildIndexIter<'a, T: ArrowPrimitiveType> {
     pub parent_id: T::Native,
     pub parent_id_col: &'a MaybeDictArrayAccessor<'a, PrimitiveArray<T>>,
     pub cursor: &'a mut SortedBatchCursor,
+    found: bool,
 }
 
 impl<'a, T> ChildIndexIter<'a, T>
@@ -786,6 +792,7 @@ where
             parent_id,
             parent_id_col,
             cursor,
+            found: false,
         }
     }
 }
@@ -804,10 +811,14 @@ where
 
             if let Some(curr_parent_id) = self.parent_id_col.value_at(index) {
                 if curr_parent_id < self.parent_id {
+                    if self.found {
+                        return None;
+                    }
                     self.cursor.advance();
                 }
 
                 if curr_parent_id == self.parent_id {
+                    self.found = true;
                     self.cursor.advance();
                     return Some(index);
                 }
