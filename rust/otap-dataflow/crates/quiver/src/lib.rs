@@ -145,3 +145,247 @@ pub use subscriber::{
 // This is the standard tokio-util type used for cooperative cancellation.
 pub use tokio_util::sync::CancellationToken;
 pub use wal::WalError;
+
+#[cfg(test)]
+mod test {
+    use arrow_array::{
+        DictionaryArray, Int64Array, RecordBatch, StringArray, UInt8Array, UInt16Array,
+    };
+    use arrow_buffer::Buffer;
+    use arrow_ipc::{
+        Block, FooterBuilder, MetadataVersion,
+        convert::{IpcSchemaEncoder, fb_to_schema},
+        reader::{FileDecoder, read_footer_length},
+        root_as_footer,
+        writer::{
+            CompressionContext, DictionaryHandling, DictionaryTracker, IpcDataGenerator,
+            IpcWriteOptions, write_message,
+        },
+    };
+    use arrow_schema::{DataType, Field, Schema};
+    use flatbuffers::FlatBufferBuilder;
+    use std::io::Write;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_quiver_multi_dict_example() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "col_a",
+                DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)),
+                true,
+            ),
+            Field::new(
+                "col_b",
+                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Int64)),
+                true,
+            ),
+        ]));
+
+        let batch1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(DictionaryArray::new(
+                    UInt8Array::from_iter_values([0, 0, 1]),
+                    Arc::new(StringArray::from_iter_values(["a", "b"])),
+                )),
+                Arc::new(DictionaryArray::new(
+                    UInt16Array::from_iter_values([0, 0, 1]),
+                    Arc::new(Int64Array::from_iter_values([506, 902])),
+                )),
+            ],
+        )
+        .unwrap();
+
+        let batch2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(DictionaryArray::new(
+                    UInt8Array::from_iter_values([0, 0, 1]),
+                    Arc::new(StringArray::from_iter_values(["c", "d"])),
+                )),
+                Arc::new(DictionaryArray::new(
+                    UInt16Array::from_iter_values([0, 0, 1]),
+                    Arc::new(Int64Array::from_iter_values([506, 902])),
+                )),
+            ],
+        )
+        .unwrap();
+
+        let ipc_write_options =
+            IpcWriteOptions::default().with_dictionary_handling(DictionaryHandling::Resend);
+
+        // pretend this is a file ...
+        let mut ipc_bytes_destination: Vec<u8> = Vec::new();
+
+        // everything in this next section would basically be logic for our custom IPC writer:
+
+        // keep track of the block offsets
+        let mut block_offsets: usize = 0;
+
+        // we could add the standard IPC file header if we want ...
+        //
+        // fn pad_to_alignment(alignment: u8, len: usize) -> usize {
+        //     let a = usize::from(alignment - 1);
+        //     ((len + a) & !a) - len
+        // }
+        const ARROW_MAGIC: [u8; 6] = [b'A', b'R', b'R', b'O', b'W', b'1'];
+        // const PADDING: [u8; {const}] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        // let pad_len = pad_to_alignment(ipc_write_options.alignment, ARROW_MAGIC.len());
+        // let pad_len = pad_to_alignment(alignment, len)
+        // let header_size = ARROW_MAGIC.len() + pad_len;
+        // ipc_bytes_destination.write_all(&ARROW_MAGIC).unwrap();
+        // ipc_bytes_destination.write_all(&PADDING[..pad_len])?;
+        // block_offsets += header_size;
+
+        let ipc_data_gen = IpcDataGenerator::default();
+        let mut dictionary_tracker = DictionaryTracker::new(false);
+        let mut compression_context = CompressionContext::default();
+
+        let encoded_schema = ipc_data_gen.schema_to_bytes_with_dictionary_tracker(
+            schema.as_ref(),
+            &mut dictionary_tracker,
+            &ipc_write_options,
+        );
+        let (meta, data) = write_message(
+            &mut ipc_bytes_destination,
+            encoded_schema,
+            &ipc_write_options,
+        )
+        .unwrap();
+        block_offsets += meta + data;
+
+        let num_dicts = dictionary_tracker.dict_id().len();
+
+        let mut dict_blocks = Vec::new();
+        let mut rb_blocks = Vec::new();
+
+        let mut write = |batch| {
+            // do this after each batch is written (or before)...
+            // this is a bit of a hack to reset dictionary tracker but make sure it has the correct
+            // internal ID sequence. We could get rid of this hack by making a contribution to OSS
+            // arrow_ipc crate probably
+            dictionary_tracker.clear();
+            for _ in 0..num_dicts {
+                _ = dictionary_tracker.next_dict_id();
+            }
+
+            let (encoded_dictionaries, encoded_message) = ipc_data_gen
+                .encode(
+                    &batch,
+                    &mut dictionary_tracker,
+                    &ipc_write_options,
+                    &mut compression_context,
+                )
+                .unwrap();
+
+            for encoded_dictionary in encoded_dictionaries {
+                let (meta, data) = write_message(
+                    &mut ipc_bytes_destination,
+                    encoded_dictionary,
+                    &ipc_write_options,
+                )
+                .unwrap();
+
+                let block = Block::new(block_offsets as i64, meta as i32, data as i64);
+                dict_blocks.push(block);
+                block_offsets += meta + data;
+            }
+
+            let (meta, data) = write_message(
+                &mut ipc_bytes_destination,
+                encoded_message,
+                &ipc_write_options,
+            )
+            .unwrap();
+            let block = Block::new(block_offsets as i64, meta as i32, data as i64);
+            rb_blocks.push(block);
+            block_offsets += meta + data;
+        };
+
+        write(batch1);
+        write(batch2);
+
+        // finish writer by writing footer -- Note, this doesn't have to be flatbuffers
+        // but just doing same as arrow IPC files b/c why not :)
+        let mut fbb = FlatBufferBuilder::new();
+        let dictionaries = fbb.create_vector(&dict_blocks);
+        let record_batches = fbb.create_vector(&rb_blocks);
+
+        // dictionaries are already written, so we can reset dictionary tracker to reuse for schema
+        dictionary_tracker.clear();
+        let schema = IpcSchemaEncoder::new()
+            .with_dictionary_tracker(&mut dictionary_tracker)
+            .schema_to_fb_offset(&mut fbb, schema.as_ref());
+
+        let root = {
+            let mut footer_builder = FooterBuilder::new(&mut fbb);
+            footer_builder.add_version(MetadataVersion::V5);
+            footer_builder.add_schema(schema);
+            footer_builder.add_dictionaries(dictionaries);
+            footer_builder.add_recordBatches(record_batches);
+            footer_builder.finish()
+        };
+        fbb.finish(root, None);
+        let footer_data = fbb.finished_data();
+        ipc_bytes_destination.write_all(footer_data).unwrap();
+        ipc_bytes_destination
+            .write_all(&(footer_data.len() as i32).to_le_bytes())
+            .unwrap();
+        ipc_bytes_destination.write_all(&ARROW_MAGIC).unwrap();
+        ipc_bytes_destination.flush().unwrap();
+
+        // everything in this next section would be stuff for the reader implementation
+        let buffer = Buffer::from(ipc_bytes_destination);
+        let trailer_start = buffer.len() - 10;
+        let footer_len = read_footer_length(buffer[trailer_start..].try_into().unwrap()).unwrap();
+        let footer_start = trailer_start.checked_sub(footer_len).unwrap();
+        let footer = root_as_footer(&buffer[footer_start..trailer_start]).unwrap();
+
+        let schema = footer.schema().unwrap();
+        let schema = fb_to_schema(schema);
+
+        let batches: Vec<Block> = footer
+            .recordBatches()
+            .map(|b| b.iter().copied().collect())
+            .unwrap_or_default();
+
+        let dict_blocks: Vec<Block> = footer
+            .dictionaries()
+            .map(|b| b.iter().copied().collect())
+            .unwrap_or_default();
+        // skipping block validation ...
+
+        let get_batch = |index: usize| {
+            // Load up a file reader with the dicts for this block .. we could cache these
+            // if the get_batch method will be called multiple times for the same index.
+            //
+            // Note: creating a FileDecoder especially for this one index is a bit of a hack
+            // it'd might be nice if maybe we could maybe read the dictionary blocks and call
+            // RecordBatchDecoder try new directly.
+
+            let mut decoder = FileDecoder::new(Arc::new(schema.clone()), footer.version());
+            for block in &dict_blocks[index * num_dicts..(index + 1) * num_dicts] {
+                let block_offset = block.offset() as usize;
+                let block_len = (block.bodyLength() as usize)
+                    .checked_add(block.metaDataLength() as usize)
+                    .unwrap();
+                let data = buffer.slice_with_length(block_offset, block_len);
+                decoder.read_dictionary(block, &data).unwrap();
+            }
+
+            let block = &batches[index];
+            let block_len = (block.bodyLength() as usize)
+                .checked_add(block.metaDataLength() as usize)
+                .unwrap();
+            let data = buffer.slice_with_length(block.offset() as usize, block_len);
+            decoder.read_record_batch(block, &data)
+        };
+
+        let batch1 = get_batch(0).unwrap().unwrap();
+        println!("read batch1 back {batch1:?}");
+
+        let batch2 = get_batch(1).unwrap().unwrap();
+        println!("read batch1 back {batch2:?}");
+    }
+}

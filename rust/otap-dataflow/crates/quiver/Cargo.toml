@@ -31,6 +31,7 @@ arrow-select.workspace = true
 bytes.workspace = true
 crc32fast.workspace = true
 blake3.workspace = true
+flatbuffers = { version = "25.2.10", default-features = false }
 parking_lot.workspace = true
 tokio = { workspace = true, features = ["fs", "sync", "time"] }
 tokio-util = { workspace = true }
