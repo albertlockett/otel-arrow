@@ -18,14 +18,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, NullArray,
+    Array, ArrayRef, AsArray, BooleanArray, DictionaryArray, Float64Array, Int64Array, NullArray,
     RecordBatch, StringArray, StructArray, UInt8Array, UInt16Array,
 };
 use arrow::buffer::BooleanBuffer;
 use arrow::compute::kernels::cmp::{eq, neq};
 use arrow::compute::kernels::merge::merge;
 use arrow::compute::{and_not, cast, filter, max, take};
-use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
+use arrow::datatypes::{DataType, Field, Fields, Schema, UInt16Type};
 use async_trait::async_trait;
 use data_engine_expressions::QueryLocation;
 use datafusion::config::ConfigOptions;
@@ -43,6 +43,7 @@ use otap_df_pdata::otap::transform::upsert_attributes::{
 };
 use otap_df_pdata::otlp::attributes::AttributeValueType;
 use otap_df_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
+use otap_df_pdata::proto::opentelemetry::metrics::v1::metric::Data;
 use otap_df_pdata::schema::consts::metadata;
 use otap_df_pdata::schema::{consts, get_field_metadata, update_field_metadata};
 
@@ -415,6 +416,47 @@ impl AssignPipelineStage {
                 });
             }
         }
+
+        Ok(otap_batch)
+    }
+
+    fn assign_to_struct_column(
+        &self,
+        mut otap_batch: OtapArrowRecords,
+        mut eval_result: PhysicalExprEvalResult,
+        dest_scope: &Rc<DataScope>,
+        dest_column_name: &str,
+        dest_field_name: &str,
+    ) -> Result<OtapArrowRecords> {
+        let root_batch = match otap_batch.root_record_batch() {
+            Some(rb) => rb,
+            None => {
+                // nothing to do
+                return Ok(otap_batch);
+            }
+        };
+
+        // TODO type validation:
+        // // TODO - if we validate that the field name exists in the constructor, then we can expect.
+        // // We also need to make sure that, however we validate, that we've covered all the valid
+        // // field names for any struct column.
+        // let expected_field_logical_type = root_field_type(dest_field_name).unwrap();
+
+        // TODO actually check this
+        let column_supports_dict_encoding = true;
+
+        let values = eval_result_to_array(
+            &eval_result.values,
+            column_supports_dict_encoding,
+            root_batch.num_rows(),
+        )?;
+
+        // replace the root record batch with the new one
+        let root_payload_type = otap_batch.root_payload_type();
+        otap_batch.set(
+            root_payload_type,
+            try_upsert_struct_col(dest_column_name, dest_field_name, values, root_batch)?,
+        )?;
 
         Ok(otap_batch)
     }
@@ -792,26 +834,35 @@ impl PipelineStage for AssignPipelineStage {
         // support bulk assignment so we just evaluate the expressions and update the columns
         // one at a time
         for i in 0..self.sources.len() {
-            let dest_col_name = match &self.dest_columns[i] {
-                ColumnAccessor::ColumnName(col_name) => col_name,
-                other_dest => {
-                    return Err(Error::NotYetSupportedError {
-                        message: format!(
-                            "assignment to column destination {:?} not yet supported",
-                            other_dest
-                        ),
-                    });
-                }
-            };
-
             let eval_result = self.sources[i].execute(&otap_batch, session_context)?;
             let dest_scope = &self.dest_scopes[i];
-            otap_batch = match eval_result {
-                Some(eval_result) => {
-                    self.assign_to_root(otap_batch, eval_result, dest_scope, dest_col_name)
+            match &self.dest_columns[i] {
+                ColumnAccessor::ColumnName(dest_col_name) => {
+                    otap_batch = match eval_result {
+                        Some(eval_result) => {
+                            self.assign_to_root(otap_batch, eval_result, dest_scope, dest_col_name)
+                        }
+                        None => self.assign_null_root_column(otap_batch, dest_col_name),
+                    }?;
                 }
-                None => self.assign_null_root_column(otap_batch, dest_col_name),
-            }?;
+                ColumnAccessor::StructCol(struct_col_name, field_name) => {
+                    otap_batch = match eval_result {
+                        Some(eval_result) => self.assign_to_struct_column(
+                            otap_batch,
+                            eval_result,
+                            dest_scope,
+                            struct_col_name,
+                            field_name,
+                        ),
+                        None => {
+                            todo!("handle insert null")
+                        }
+                    }?;
+                }
+                ColumnAccessor::Attributes(_, _) => {
+                    todo!("handle invalid state where we have somehow have mixed destinations?")
+                }
+            };
         }
 
         Ok(otap_batch)
@@ -1410,6 +1461,9 @@ fn validate_assign(
                 });
             }
         }
+        ColumnAccessor::StructCol(_, _) => {
+            // TODO need to perform validation here
+        }
         ColumnAccessor::Attributes(dest_attrs_id, _) => {
             if !can_assign_type(&ExprLogicalType::AnyValue, &source_logical_plan.expr_type) {
                 return Err(Error::InvalidPipelineError {
@@ -1426,15 +1480,6 @@ fn validate_assign(
                 dest_query_location,
                 source_logical_plan,
             )?;
-        }
-        other_dest => {
-            // TODO other assignment destinations will be supported soon
-            return Err(Error::NotYetSupportedError {
-                message: format!(
-                    "assignment to column destination {:?} not yet supported",
-                    other_dest
-                ),
-            });
         }
     }
 
@@ -1670,12 +1715,63 @@ fn try_upsert_column(
     new_column: ArrayRef,
     record_batch: &RecordBatch,
 ) -> Result<RecordBatch> {
-    let mut columns = record_batch.columns().to_vec();
-    let schema = record_batch.schema();
-    let fields = schema.fields();
+    let (fields, columns) = try_upsert_array_in_columns(
+        column_name,
+        new_column,
+        record_batch.schema().fields(),
+        record_batch.columns().to_vec(),
+    )?;
+
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?)
+}
+
+fn try_upsert_struct_col(
+    struct_column_name: &str,
+    field_name: &str,
+    new_column: ArrayRef,
+    record_batch: &RecordBatch,
+) -> Result<RecordBatch> {
+    let rb_schema = record_batch.schema_ref();
+    let rb_fields = rb_schema.fields();
+    let maybe_found_column = rb_fields.find(struct_column_name);
+    let new_struct_col = if let Some((rb_col_index, current_field)) = maybe_found_column {
+        // upsert the column on the existing struct field
+        let struct_col = record_batch.column(rb_col_index);
+        let (new_struct_fields, new_struct_columns) =
+            if let DataType::Struct(struct_fields) = current_field.data_type() {
+                try_upsert_array_in_columns(
+                    field_name,
+                    new_column,
+                    struct_fields,
+                    struct_col.as_struct().columns().to_vec(),
+                )?
+            } else {
+                todo!("invalid data type")
+            };
+
+        StructArray::new(
+            new_struct_fields,
+            new_struct_columns,
+            struct_col.nulls().cloned(),
+        )
+    } else {
+        todo!("create new struct column")
+    };
+
+    try_upsert_column(struct_column_name, Arc::new(new_struct_col), record_batch)
+}
+
+fn try_upsert_array_in_columns(
+    column_name: &str,
+    new_column: ArrayRef,
+    fields: &Fields,
+    mut columns: Vec<ArrayRef>,
+) -> Result<(Fields, Vec<ArrayRef>)> {
     let maybe_found_column = fields.find(column_name);
     let mut fields = fields.to_vec();
-
     if let Some((target_col_index, current_field)) = maybe_found_column {
         // check that we're not assigning a column with nulls to a non-nullable column
         if !current_field.is_nullable() && new_column.null_count() != 0 {
@@ -1723,10 +1819,7 @@ fn try_upsert_column(
         columns.push(new_column)
     }
 
-    Ok(RecordBatch::try_new(
-        Arc::new(Schema::new(fields)),
-        columns,
-    )?)
+    Ok((fields.into(), columns))
 }
 
 #[cfg(test)]
@@ -2951,6 +3044,66 @@ mod test {
                 panic!("expected error, received Ok")
             }
         }
+    }
+
+    // TODO these are the test cases to cover:
+    // ---------------------------------------
+    // struct.str = static
+    // struct.str = bigger_struct.str
+    // struct.str = smaller_struct.str <fail>
+    // struct.str = root.str <fail b/c smaller>
+    // struct.str = self.attribute <ok>
+    // struct.str = smaller.attribute <fail>
+    // struct.str = bigger.attribute <ok>
+    //
+    // Others to consider
+    // - assigning the wrong type
+    // - non str column being assigned
+    // - assigning null
+    // - assigning result of expr (func call, arith, etc.)
+    // - test when no struct column already exists
+    // - test when no struct column field already exists
+    // - assigning to schema_url
+    // - assigning multiple struct cols - do they combine in planner?
+    // - assigning AnyValue
+    // - exec on empty batch
+
+    async fn test_insert_scalar_to_struct_col<P: Parser>() {
+        let logs_data = LogsData {
+            resource_logs: vec![ResourceLogs::new(
+                Resource::default(),
+                vec![
+                    ScopeLogs::new(
+                        InstrumentationScope::build().name("scope1").finish(),
+                        vec![LogRecord::build().event_name("event1").finish()],
+                    ),
+                    ScopeLogs::new(
+                        InstrumentationScope::build().name("scope2").finish(),
+                        vec![LogRecord::build().event_name("event2").finish()],
+                    ),
+                ],
+            )],
+        };
+
+        let input_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
+        // TODO - maybe just double check there is an existing struct column with the field we're updating
+        let pipeline_expr = P::parse("logs | extend instrumentation_scope.name = \"new_name\"")
+            .unwrap()
+            .pipeline;
+        let mut pipeline = Pipeline::new(pipeline_expr);
+        let result = pipeline.execute(input_batch).await.unwrap();
+
+        // TODO validate the output
+    }
+
+    #[tokio::test]
+    async fn test_insert_scalar_to_struct_col_opl_parser() {
+        test_insert_scalar_to_struct_col::<OplParser>().await
+    }
+
+    #[tokio::test]
+    async fn test_insert_scalar_to_struct_col_kql_parser() {
+        test_insert_scalar_to_struct_col::<KqlParser>().await
     }
 
     async fn test_upserts_attribute_computed_from_root<P: Parser>() {
