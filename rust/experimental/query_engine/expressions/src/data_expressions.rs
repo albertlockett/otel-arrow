@@ -57,8 +57,8 @@ impl Expression for DataExpression {
             DataExpression::Discard(_) => "DataExpression(Discard)",
             DataExpression::Summary(_) => "DataExpression(Summary)",
             DataExpression::Transform(_) => "DataExpression(Transform)",
-            DataExpression::Fork(_) => "DataExpression(Fork)",
             DataExpression::Conditional(_) => "DataExpression(Conditional)",
+            DataExpression::Fork(_) => "DataExpression(Fork)",
             DataExpression::Output(_) => "DataExpression(Output)",
         }
     }
