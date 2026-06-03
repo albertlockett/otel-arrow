@@ -1,0 +1,4 @@
+change_type: enhancement
+component: query-engine
+note: adds Expression AST structure to support OPL fork operator
+issues: [3188]
