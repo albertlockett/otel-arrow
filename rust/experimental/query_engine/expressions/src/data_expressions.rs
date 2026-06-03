@@ -17,6 +17,9 @@ pub enum DataExpression {
     /// Conditional data expression.
     Conditional(ConditionalDataExpression),
 
+    /// Fork data expression.
+    Fork(ForkDataExpression),
+
     /// Output data expression.
     Output(OutputDataExpression),
 }
@@ -31,6 +34,7 @@ impl DataExpression {
             DataExpression::Summary(s) => s.try_fold(scope),
             DataExpression::Transform(t) => t.try_fold(scope),
             DataExpression::Conditional(c) => c.try_fold(scope),
+            DataExpression::Fork(f) => f.try_fold(scope),
             DataExpression::Output(o) => o.try_fold(scope),
         }
     }
@@ -43,6 +47,7 @@ impl Expression for DataExpression {
             DataExpression::Summary(s) => s.get_query_location(),
             DataExpression::Transform(t) => t.get_query_location(),
             DataExpression::Conditional(c) => c.get_query_location(),
+            DataExpression::Fork(f) => f.get_query_location(),
             DataExpression::Output(o) => o.get_query_location(),
         }
     }
@@ -52,6 +57,7 @@ impl Expression for DataExpression {
             DataExpression::Discard(_) => "DataExpression(Discard)",
             DataExpression::Summary(_) => "DataExpression(Summary)",
             DataExpression::Transform(_) => "DataExpression(Transform)",
+            DataExpression::Fork(_) => "DataExpression(Fork)",
             DataExpression::Conditional(_) => "DataExpression(Conditional)",
             DataExpression::Output(_) => "DataExpression(Output)",
         }
@@ -63,6 +69,7 @@ impl Expression for DataExpression {
             DataExpression::Summary(s) => s.fmt_with_indent(f, indent),
             DataExpression::Transform(t) => t.fmt_with_indent(f, indent),
             DataExpression::Conditional(c) => c.fmt_with_indent(f, indent),
+            DataExpression::Fork(d) => d.fmt_with_indent(f, indent),
             DataExpression::Output(o) => o.fmt_with_indent(f, indent),
         }
     }
@@ -348,6 +355,124 @@ impl ConditionalDataExpressionBranch {
 
     pub fn get_expressions(&self) -> &[DataExpression] {
         &self.expressions
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForkDataExpression {
+    query_location: QueryLocation,
+    branches: Vec<ForkDataExpressionBranch>,
+}
+
+impl ForkDataExpression {
+    pub fn new(query_location: QueryLocation) -> Self {
+        Self {
+            query_location,
+            branches: Vec::new(),
+        }
+    }
+
+    pub fn with_branch(mut self, branch: ForkDataExpressionBranch) -> Self {
+        self.branches.push(branch);
+        self
+    }
+
+    pub fn get_branches(&self) -> &[ForkDataExpressionBranch] {
+        &self.branches
+    }
+
+    fn try_fold(&mut self, scope: &PipelineResolutionScope) -> Result<(), ExpressionError> {
+        for branch in &mut self.branches {
+            branch.try_fold(scope)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Expression for ForkDataExpression {
+    fn get_query_location(&self) -> &QueryLocation {
+        &self.query_location
+    }
+
+    fn get_name(&self) -> &'static str {
+        "ForkDataExpression"
+    }
+
+    fn fmt_with_indent(&self, f: &mut std::fmt::Formatter<'_>, indent: &str) -> std::fmt::Result {
+        writeln!(f, "Fork")?;
+        if self.branches.is_empty() {
+            writeln!(f, "{indent}└── Branches: []")?;
+        } else {
+            writeln!(f, "{indent}└── Branches:")?;
+            let last_idx = self.branches.len() - 1;
+            for (i, branch) in self.branches.iter().enumerate() {
+                if i == last_idx {
+                    if branch.expressions.is_empty() {
+                        writeln!(f, "{indent}    └── Expressions: []")?;
+                    } else {
+                        writeln!(f, "{indent}    └── Expressions:")?;
+                        let last_idx = branch.expressions.len() - 1;
+                        for (i, expr) in branch.expressions.iter().enumerate() {
+                            if i == last_idx {
+                                write!(f, "{indent}        └── ")?;
+                                expr.fmt_with_indent(f, &format!("{indent}            "))?;
+                            } else {
+                                write!(f, "{indent}        ├── ")?;
+                                expr.fmt_with_indent(f, &format!("{indent}        │   "))?;
+                            }
+                        }
+                    }
+                } else {
+                    if branch.expressions.is_empty() {
+                        writeln!(f, "{indent}    ├── Expressions: []")?;
+                    } else {
+                        writeln!(f, "{indent}    ├── Expressions:")?;
+                        let last_idx = branch.expressions.len() - 1;
+                        for (i, expr) in branch.expressions.iter().enumerate() {
+                            if i == last_idx {
+                                write!(f, "{indent}    │   └── ")?;
+                                expr.fmt_with_indent(f, &format!("{indent}    │       "))?;
+                            } else {
+                                write!(f, "{indent}    │   ├── ")?;
+                                expr.fmt_with_indent(f, &format!("{indent}    │   │   "))?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForkDataExpressionBranch {
+    query_location: QueryLocation,
+
+    /// The expressions to apply to the data handled by this branch
+    expressions: Vec<DataExpression>,
+}
+
+impl ForkDataExpressionBranch {
+    pub fn new(query_location: QueryLocation, expressions: Vec<DataExpression>) -> Self {
+        Self {
+            query_location,
+            expressions,
+        }
+    }
+
+    pub fn get_expressions(&self) -> &[DataExpression] {
+        &self.expressions
+    }
+
+    fn try_fold(&mut self, scope: &PipelineResolutionScope) -> Result<(), ExpressionError> {
+        for expr in &mut self.expressions {
+            expr.try_fold(scope)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -911,6 +1036,76 @@ mod test {
             "Discard\n\
             ├── Target: None\n\
             └── Predicate: None\n"
+        );
+    }
+
+    #[test]
+    fn test_format_with_indent_fork() {
+        let fork_expr = ForkDataExpression::new(QueryLocation::new_fake())
+            .with_branch(ForkDataExpressionBranch::new(
+                QueryLocation::new_fake(),
+                vec![
+                    DataExpression::Discard(DiscardDataExpression::new(QueryLocation::new_fake())),
+                    DataExpression::Discard(DiscardDataExpression::new(QueryLocation::new_fake())),
+                ],
+            ))
+            .with_branch(ForkDataExpressionBranch::new(
+                QueryLocation::new_fake(),
+                vec![DataExpression::Discard(DiscardDataExpression::new(
+                    QueryLocation::new_fake(),
+                ))],
+            ));
+
+        let output = format!("{}", DisplayWrapper(&fork_expr, ""));
+        assert_eq!(
+            output,
+            "Fork\n\
+            └── Branches:\n    \
+                ├── Expressions:\n    \
+                │   ├── Discard\n    \
+                │   │   ├── Target: None\n    \
+                │   │   └── Predicate: None\n    \
+                │   └── Discard\n    \
+                │       ├── Target: None\n    \
+                │       └── Predicate: None\n    \
+                └── Expressions:\n        \
+                    └── Discard\n            \
+                        ├── Target: None\n            \
+                        └── Predicate: None\n"
+        );
+    }
+
+    #[test]
+    fn test_format_with_indent_fork_empty_branches() {
+        let fork_expr = ForkDataExpression::new(QueryLocation::new_fake())
+            .with_branch(ForkDataExpressionBranch::new(
+                QueryLocation::new_fake(),
+                vec![],
+            ))
+            .with_branch(ForkDataExpressionBranch::new(
+                QueryLocation::new_fake(),
+                vec![],
+            ));
+
+        let output = format!("{}", DisplayWrapper(&fork_expr, ""));
+        assert_eq!(
+            output,
+            "Fork\n\
+            └── Branches:\n    \
+                ├── Expressions: []\n    \
+                └── Expressions: []\n"
+        );
+    }
+
+    #[test]
+    fn test_format_with_indent_fork_empty() {
+        let fork_expr = ForkDataExpression::new(QueryLocation::new_fake());
+
+        let output = format!("{}", DisplayWrapper(&fork_expr, ""));
+        assert_eq!(
+            output,
+            "Fork\n\
+            └── Branches: []\n"
         );
     }
 }
