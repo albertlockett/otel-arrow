@@ -1076,7 +1076,7 @@ mod test {
     }
 
     #[test]
-    fn test_format_with_indent_fork_empty_branches() {
+    fn test_format_with_indent_fork_empty_branch_expressions() {
         let fork_expr = ForkDataExpression::new(QueryLocation::new_fake())
             .with_branch(ForkDataExpressionBranch::new(
                 QueryLocation::new_fake(),
