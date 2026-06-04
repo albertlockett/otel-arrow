@@ -512,13 +512,13 @@ pub(crate) fn parse_apply_operator_call(
 mod tests {
     use data_engine_expressions::{
         ArgumentScalarExpression, ConditionalDataExpression, ConditionalDataExpressionBranch,
-        DataExpression, DiscardDataExpression, EqualToLogicalExpression,
-        InvokeFunctionScalarExpression, LogicalExpression, MapKeyRenameSelector,
-        MapSelectionExpression, MapSelector, MutableValueExpression, NotLogicalExpression,
-        OutputDataExpression, OutputExpression, PipelineFunction, PipelineFunctionExpression,
-        PipelineFunctionParameter, PipelineFunctionParameterType, QueryLocation,
-        ReduceMapTransformExpression, RenameMapKeysTransformExpression, ScalarExpression,
-        SetTransformExpression, SourceScalarExpression, StaticScalarExpression,
+        DataExpression, DiscardDataExpression, EqualToLogicalExpression, ForkDataExpression,
+        ForkDataExpressionBranch, InvokeFunctionScalarExpression, LogicalExpression,
+        MapKeyRenameSelector, MapSelectionExpression, MapSelector, MutableValueExpression,
+        NotLogicalExpression, OutputDataExpression, OutputExpression, PipelineFunction,
+        PipelineFunctionExpression, PipelineFunctionParameter, PipelineFunctionParameterType,
+        QueryLocation, ReduceMapTransformExpression, RenameMapKeysTransformExpression,
+        ScalarExpression, SetTransformExpression, SourceScalarExpression, StaticScalarExpression,
         StringScalarExpression, TransformExpression, ValueAccessor, ValueType,
     };
     use data_engine_parser_abstractions::{Parser, ParserOptions, ParserState};
@@ -818,6 +818,46 @@ mod tests {
                     vec![assign_attribute_expression("triggers_alarm", "true")],
                 ),
             ),
+        );
+        assert_eq!(expressions[0], expected);
+    }
+
+    #[test]
+    pub fn test_fork_operator_call() {
+        let query = r#"
+               logs | 
+               fork
+               {
+                   extend attributes["triggers_alarm"] = "true"
+               }
+               {
+                   extend attributes["is_duplicate"] = "true"
+               }
+               {
+                   extend attributes["is_duplicate_again"] = "true"
+               }
+           "#;
+        let result = OplParser::parse(query);
+        assert!(result.is_ok());
+
+        let pipeline = result.unwrap().pipeline;
+        let expressions = pipeline.get_expressions();
+        assert_eq!(expressions.len(), 1);
+
+        let expected = DataExpression::Fork(
+            ForkDataExpression::new(QueryLocation::new_fake())
+                .with_branch(ForkDataExpressionBranch::new(
+                    QueryLocation::new_fake(),
+                    vec![assign_attribute_expression("triggers_alarm", "true")],
+                ))
+                .with_branch(ForkDataExpressionBranch::new(
+                    QueryLocation::new_fake(),
+                    vec![assign_attribute_expression("is_duplicate", "true")],
+                ))
+                .with_branch(ForkDataExpressionBranch::new(
+                    QueryLocation::new_fake(),
+                    vec![assign_attribute_expression("is_duplicate_again", "true")],
+                )),
         );
         assert_eq!(expressions[0], expected);
     }
