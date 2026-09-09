@@ -741,7 +741,8 @@ fn get_log_id(id_array: Option<&UInt16Array>, row_idx: usize) -> Option<u16> {
 mod tests {
     use super::*;
     use arrow::array::{
-        ArrayRef, Int32Array, Int64Array, StringArray, StructArray, UInt8Array, UInt16Array,
+        ArrayRef, DictionaryArray, Int32Array, Int64Array, StringArray, StructArray, UInt8Array,
+        UInt16Array,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use otel_arrow_dfe_pdata_views::views::common::{AnyValueView, AttributeView};
@@ -752,13 +753,29 @@ mod tests {
         // Define schema matching OTAP logs structure
         let resource_field = Field::new(
             "resource",
-            DataType::Struct(vec![Field::new("id", DataType::UInt16, false)].into()),
+            DataType::Struct(
+                vec![
+                    Field::new("id", DataType::UInt16, false),
+                    Field::new("dropped_attributes_count", DataType::UInt32, true),
+                ]
+                .into(),
+            ),
             false,
         );
 
         let scope_field = Field::new(
             "scope",
-            DataType::Struct(vec![Field::new("id", DataType::UInt16, false)].into()),
+            DataType::Struct(
+                vec![
+                    Field::new("id", DataType::UInt16, false),
+                    Field::new(
+                        "name",
+                        DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)),
+                        true,
+                    ),
+                ]
+                .into(),
+            ),
             false,
         );
 
@@ -804,17 +821,40 @@ mod tests {
 
         // Resource structs (all from resource_id=1)
         let resource_id_array = UInt16Array::from(vec![1, 1, 1]);
-        let resource_struct = StructArray::from(vec![(
-            Arc::new(Field::new("id", DataType::UInt16, false)),
-            Arc::new(resource_id_array) as ArrayRef,
-        )]);
+        let resource_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("id", DataType::UInt16, false)),
+                Arc::new(resource_id_array) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new(
+                    "dropped_attributes_count",
+                    DataType::UInt32,
+                    true,
+                )),
+                Arc::new(UInt32Array::from_iter([Some(1), Some(0), None])) as ArrayRef,
+            ),
+        ]);
 
         // Scope structs (logs 1-2 from scope_id=10, log 3 from scope_id=11)
         let scope_id_array = UInt16Array::from(vec![10, 10, 11]);
-        let scope_struct = StructArray::from(vec![(
-            Arc::new(Field::new("id", DataType::UInt16, false)),
-            Arc::new(scope_id_array) as ArrayRef,
-        )]);
+        let scope_struct = StructArray::from(vec![
+            (
+                Arc::new(Field::new("id", DataType::UInt16, false)),
+                Arc::new(scope_id_array) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new(
+                    "name",
+                    DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)),
+                    true,
+                )),
+                Arc::new(DictionaryArray::new(
+                    UInt8Array::from_iter([Some(0), None, None]),
+                    Arc::new(StringArray::from_iter_values(["foo"])),
+                )) as ArrayRef,
+            ),
+        ]);
 
         let time_array = TimestampNanosecondArray::from(vec![
             Some(1000000000),
@@ -954,17 +994,37 @@ mod tests {
         let mut scope_count = 0;
         let mut log_count = 0;
 
-        for resource_logs in logs_view.resources() {
+        for (rl_idx, resource_logs) in logs_view.resources().enumerate() {
             resource_count += 1;
 
             // Verify resource attributes
-            if let Some(resource) = resource_logs.resource() {
-                let attr_count = resource.attributes().count();
-                assert_eq!(attr_count, 2, "Expected 2 resource attributes");
-            }
+            let resource = resource_logs.resource().unwrap();
+            let attr_count = resource.attributes().count();
+            assert_eq!(attr_count, 2, "Expected 2 resource attributes");
 
-            for scope_logs in resource_logs.scopes() {
+            let dropped_attr_count = resource.dropped_attributes_count();
+            let expected_dropped_attrs = match rl_idx {
+                0 => 1,
+                1 | 2 => 0,
+                _ => {
+                    panic!("too many resource logs")
+                }
+            };
+            assert_eq!(dropped_attr_count, expected_dropped_attrs);
+
+            for (sl_idx, scope_logs) in resource_logs.scopes().enumerate() {
                 scope_count += 1;
+
+                let scope = scope_logs.scope().unwrap();
+                let scope_name = scope.name();
+                let expected_scope_name = match sl_idx {
+                    0 => Some("foo".as_bytes()),
+                    1 => None,
+                    _ => {
+                        panic!("too many scope logs")
+                    }
+                };
+                assert_eq!(scope_name, expected_scope_name);
 
                 for log_record in scope_logs.log_records() {
                     log_count += 1;
