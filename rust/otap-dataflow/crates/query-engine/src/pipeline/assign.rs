@@ -602,7 +602,7 @@ impl AssignPipelineStage {
         };
 
         let (attrs_payload_type, id_col) = match dest_attrs_id {
-            AttributesIdentifier::Root => {
+            AttributesIdentifier::Record(RecordScope::Signal) => {
                 let attrs_payload_type = match otap_batch {
                     OtapArrowRecords::Logs(_) => ArrowPayloadType::LogAttrs,
                     OtapArrowRecords::Metrics(_) => ArrowPayloadType::MetricAttrs,
@@ -611,7 +611,10 @@ impl AssignPipelineStage {
                 let id_col = root_record_batch.column_by_name(consts::ID);
                 (attrs_payload_type, id_col)
             }
-            AttributesIdentifier::NonRoot(payload_type) => {
+            AttributesIdentifier::Record(RecordScope::Child(child)) => {
+                todo!("this needs to be extracted into a helper that we pass the stuff in ");
+            }
+            AttributesIdentifier::NonRecord(payload_type) => {
                 let struct_col_name = match payload_type {
                     ArrowPayloadType::ResourceAttrs => consts::RESOURCE,
                     ArrowPayloadType::ScopeAttrs => consts::SCOPE,
@@ -866,12 +869,15 @@ impl AssignPipelineStage {
         }
 
         let attrs_payload_type = match dest_attrs_id {
-            AttributesIdentifier::Root => match otap_batch {
+            AttributesIdentifier::Record(RecordScope::Signal) => match otap_batch {
                 OtapArrowRecords::Logs(_) => ArrowPayloadType::LogAttrs,
                 OtapArrowRecords::Metrics(_) => ArrowPayloadType::MetricAttrs,
                 OtapArrowRecords::Traces(_) => ArrowPayloadType::SpanAttrs,
             },
-            AttributesIdentifier::NonRoot(payload_type) => payload_type,
+            AttributesIdentifier::NonRecord(payload_type) => payload_type,
+            AttributesIdentifier::Record(RecordScope::Child(_)) => {
+                todo!("need to handle this")
+            }
         };
 
         let Some(mut attrs_record_batch) = otap_batch.get(attrs_payload_type).cloned() else {
@@ -1124,7 +1130,7 @@ impl PipelineStage for AssignPipelineStage {
     ) -> Result<OtapArrowRecords> {
         // if we're assigning to attributes, do it as a bulk attribute upsert for best performance
         if let ColumnAccessor::Attributes(attrs_id, _) = &self.dest_columns[0] {
-            if *attrs_id == AttributesIdentifier::Root {
+            if matches!(attrs_id, AttributesIdentifier::Record(_)) {
                 self.fill_root_id_column_nulls(&mut otap_batch, exec_state)?;
             }
 
@@ -1518,7 +1524,7 @@ impl PipelineStage for AssignPipelineStage {
         // to ensure the IDs that are assigned are not duplicated across branches. That is why we
         // add this extension.
         if let ColumnAccessor::Attributes(attrs_id, _) = &self.dest_columns[0]
-            && *attrs_id == AttributesIdentifier::Root
+            && matches!(attrs_id, AttributesIdentifier::Record(_))
             && exec_state.get_extension::<NextIdTracker>().is_none()
         {
             let next_id_tracker = NextIdTracker::try_new(otap_batch)?;
@@ -2044,16 +2050,16 @@ fn validate_assign(
 /// there can be many logs with different events to a single resource, it is ambiguous what the
 /// actual value should be and os we consider this an invalid expression
 ///
-/// This walks the `ScopedExpr` tree and checks the `DataScope` at each `Eval` leaf. For non-root
-/// attribute destinations, root-scoped data and bitmap operations (which produce root-scoped
+/// This walks the `ScopedExpr` tree and checks the `DataScope` at each `Eval` leaf. For non-record
+/// attribute destinations, record-scoped data and bitmap operations (which produce root-scoped
 /// booleans) are invalid because of the one-to-many relationship.
 fn validate_expr_cardinality(
     dest_attrs_id: AttributesIdentifier,
     dest_query_location: Option<&QueryLocation>,
     expr: &ScopedExpr,
 ) -> Result<()> {
-    if dest_attrs_id == AttributesIdentifier::Root {
-        // root attributes have no 1:many relations
+    if matches!(dest_attrs_id, AttributesIdentifier::Record(_)) {
+        // record attributes have no 1:many relations
         return Ok(());
     }
 
@@ -2063,7 +2069,7 @@ fn validate_expr_cardinality(
                 // always valid to assign a scalar
                 DataScope::StaticScalar => true,
 
-                // we've already determined we're not assigning to a root attribute, so the
+                // we've already determined we're not assigning to a record attribute, so the
                 // destination must be something that has a one:many relationship with root like
                 // resource or scope
                 DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_) => false,
@@ -2083,10 +2089,10 @@ fn validate_expr_cardinality(
                     dest_attrs_id == *source_attrs_id
                         || matches!(
                             dest_attrs_id,
-                            AttributesIdentifier::NonRoot(ArrowPayloadType::ScopeAttrs)
+                            AttributesIdentifier::NonRecord(ArrowPayloadType::ScopeAttrs)
                         ) && matches!(
                             source_attrs_id,
-                            AttributesIdentifier::NonRoot(ArrowPayloadType::ResourceAttrs)
+                            AttributesIdentifier::NonRecord(ArrowPayloadType::ResourceAttrs)
                         )
                 }
             };
@@ -2183,12 +2189,12 @@ fn validate_struct_col_assign_cardinality(
                 | DataScope::AttributesAll(source_attrs_id) => match dest_struct_name {
                     consts::RESOURCE => matches!(
                         source_attrs_id,
-                        AttributesIdentifier::NonRoot(ArrowPayloadType::ResourceAttrs)
+                        AttributesIdentifier::NonRecord(ArrowPayloadType::ResourceAttrs)
                     ),
                     consts::SCOPE => matches!(
                         source_attrs_id,
-                        AttributesIdentifier::NonRoot(ArrowPayloadType::ResourceAttrs)
-                            | AttributesIdentifier::NonRoot(ArrowPayloadType::ScopeAttrs)
+                        AttributesIdentifier::NonRecord(ArrowPayloadType::ResourceAttrs)
+                            | AttributesIdentifier::NonRecord(ArrowPayloadType::ScopeAttrs)
                     ),
                     _ => false,
                 },
@@ -4027,7 +4033,7 @@ mod test {
         let err = pipeline.execute(input).await.unwrap_err();
         assert!(
             err.to_string().contains(
-                "cannot assign data scope Attribute(NonRoot(ScopeAttrs), \"key\") to struct column resource"
+                "cannot assign data scope Attribute(NonRecord(ScopeAttrs), \"key\") to struct column resource"
             ),
             "unexpected error: {}",
             err
@@ -6536,7 +6542,7 @@ mod test {
         let err_msg = err.to_string();
         assert!(
             err_msg.contains(
-                "cannot assign data scope Record(Signal) to attributes NonRoot(ResourceAttrs)"
+                "cannot assign data scope Record(Signal) to attributes NonRecord(ResourceAttrs)"
             ),
             "unexpected error message {}",
             err_msg
@@ -6549,7 +6555,7 @@ mod test {
         let err = pipeline.execute(input.clone()).await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
-            err_msg.contains("cannot assign data scope Attribute(Root, \"x\") to attributes NonRoot(ResourceAttrs)"),
+            err_msg.contains("cannot assign data scope Attribute(Record(Signal), \"x\") to attributes NonRecord(ResourceAttrs)"),
             "unexpected error message {}",
             err_msg
         );
@@ -6562,7 +6568,7 @@ mod test {
         let err = pipeline.execute(input.clone()).await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
-            err_msg.contains("cannot assign data scope Attribute(NonRoot(ScopeAttrs), \"x\") to attributes NonRoot(ResourceAttrs)"),
+            err_msg.contains("cannot assign data scope Attribute(NonRecord(ScopeAttrs), \"x\") to attributes NonRecord(ResourceAttrs)"),
             "unexpected error message {}",
             err_msg
         );
@@ -6575,7 +6581,7 @@ mod test {
         let err = pipeline.execute(input.clone()).await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
-            err_msg.contains("cannot assign data scope Attribute(Root, \"y\") to attributes NonRoot(ResourceAttrs)"),
+            err_msg.contains("cannot assign data scope Attribute(Record(Signal), \"y\") to attributes NonRecord(ResourceAttrs)"),
             "unexpected error message {}",
             err_msg
         );
@@ -6596,7 +6602,7 @@ mod test {
         let err_msg = err.to_string();
         assert!(
             err_msg.contains(
-                "cannot assign data scope Record(Signal) to attributes NonRoot(ScopeAttrs)"
+                "cannot assign data scope Record(Signal) to attributes NonRecord(ScopeAttrs)"
             ),
             "unexpected error message {}",
             err_msg
@@ -6610,7 +6616,7 @@ mod test {
         let err_msg = err.to_string();
         assert!(
             err_msg.contains(
-                "cannot assign data scope Attribute(Root, \"x\") to attributes NonRoot(ScopeAttrs)"
+                "cannot assign data scope Attribute(Record(Signal), \"x\") to attributes NonRecord(ScopeAttrs)"
             ),
             "unexpected error message {}",
             err_msg

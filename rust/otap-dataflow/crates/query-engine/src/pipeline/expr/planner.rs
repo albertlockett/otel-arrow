@@ -2087,8 +2087,8 @@ impl ScopedExpr {
                             DataScope::Attribute(attr_id, _),
                             DataScope::Record(_) | DataScope::RootParent(_),
                         ) => match attr_id {
-                            AttributesIdentifier::Root => curr_scope,
-                            AttributesIdentifier::NonRoot(_) => next_scope,
+                            AttributesIdentifier::Record(_) => curr_scope,
+                            AttributesIdentifier::NonRecord(_) => next_scope,
                         },
 
                         // rest always have record alignment
@@ -2560,7 +2560,7 @@ mod test {
         assert!(matches!(
             planned.expr,
             ScopedExpr::Eval {
-                scope: DataScope::Attribute(AttributesIdentifier::Root, _),
+                scope: DataScope::Attribute(AttributesIdentifier::Record(RecordScope::Signal), _),
                 ..
             }
         ));
@@ -2576,7 +2576,7 @@ mod test {
             .unwrap();
         assert!(matches!(
             result.scope,
-            DataScope::Attribute(AttributesIdentifier::Root, _)
+            DataScope::Attribute(AttributesIdentifier::Record(RecordScope::Signal), _)
         ));
         // 3 attribute rows (one per log record, each has key "x")
         match &result.values {
@@ -2882,7 +2882,7 @@ mod test {
         assert!(matches!(
             op,
             ScopedExpr::Eval {
-                scope: DataScope::AttributesAll(AttributesIdentifier::Root),
+                scope: DataScope::AttributesAll(AttributesIdentifier::Record(RecordScope::Signal)),
                 ..
             }
         ));
@@ -2922,7 +2922,7 @@ mod test {
         assert!(matches!(
             op,
             ScopedExpr::Eval {
-                scope: DataScope::AttributesAll(AttributesIdentifier::Root),
+                scope: DataScope::AttributesAll(AttributesIdentifier::Record(RecordScope::Signal)),
                 ..
             }
         ));
@@ -2981,7 +2981,7 @@ mod test {
         assert!(matches!(
             op,
             ScopedExpr::Eval {
-                scope: DataScope::AttributesAll(AttributesIdentifier::Root),
+                scope: DataScope::AttributesAll(AttributesIdentifier::Record(RecordScope::Signal)),
                 ..
             }
         ));

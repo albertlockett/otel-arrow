@@ -16,8 +16,9 @@ use datafusion::prelude::SessionContext;
 use otel_arrow_dfe_pdata::OtapArrowRecords;
 use otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::pipeline::PipelineStage;
+use crate::pipeline::expr::{ChildRecordKind, RecordScope};
 use crate::pipeline::planner::AttributesIdentifier;
 use crate::pipeline::state::ExecutionState;
 
@@ -61,12 +62,21 @@ impl ApplyPipelineStage {
         exec_state: &mut ExecutionState,
     ) -> Result<OtapArrowRecords> {
         let attrs_payload_type = match attributes_id {
-            AttributesIdentifier::Root => match otap_batch.root_payload_type() {
-                ArrowPayloadType::Logs => ArrowPayloadType::LogAttrs,
-                ArrowPayloadType::Spans => ArrowPayloadType::SpanAttrs,
-                _ => ArrowPayloadType::MetricAttrs,
-            },
-            AttributesIdentifier::NonRoot(payload_type) => payload_type,
+            AttributesIdentifier::Record(RecordScope::Signal) => {
+                match otap_batch.root_payload_type() {
+                    ArrowPayloadType::Logs => ArrowPayloadType::LogAttrs,
+                    ArrowPayloadType::Spans => ArrowPayloadType::SpanAttrs,
+                    _ => ArrowPayloadType::MetricAttrs,
+                }
+            }
+            AttributesIdentifier::Record(RecordScope::Child(ChildRecordKind::DataPoint)) => {
+                return Err(Error::NotYetSupportedError {
+                    message:
+                        "Applying nested pipeline to metric data point attributes not yet supported"
+                            .into(),
+                });
+            }
+            AttributesIdentifier::NonRecord(payload_type) => payload_type,
         };
 
         let Some(mut curr_batch) = otap_batch.get(attrs_payload_type).cloned() else {

@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::pipeline::PipelineStage;
+use crate::pipeline::expr::{ChildRecordKind, RecordScope};
 use crate::pipeline::planner::AttributesIdentifier;
 use crate::pipeline::state::ExecutionState;
 
@@ -44,12 +45,17 @@ impl PipelineStage for AttributeTransformPipelineStage {
         _exec_state: &mut ExecutionState,
     ) -> Result<OtapArrowRecords> {
         let attrs_payload_type = match self.attrs_id {
-            AttributesIdentifier::Root => match otap_batch {
+            AttributesIdentifier::Record(RecordScope::Signal) => match otap_batch {
                 OtapArrowRecords::Logs(_) => ArrowPayloadType::LogAttrs,
                 OtapArrowRecords::Traces(_) => ArrowPayloadType::SpanAttrs,
                 _ => ArrowPayloadType::MetricAttrs,
             },
-            AttributesIdentifier::NonRoot(payload_type) => payload_type,
+            AttributesIdentifier::Record(RecordScope::Child(ChildRecordKind::DataPoint)) => {
+                // TODO this should be supported, but if called like this it means the pipeline
+                // was invalid?
+                todo!("handle rename or delete applied to child attrs")
+            }
+            AttributesIdentifier::NonRecord(payload_type) => payload_type,
         };
 
         _ = apply_attribute_transform(&mut otap_batch, attrs_payload_type, &self.transform, false)?;

@@ -194,7 +194,8 @@ pub(super) fn eval_datafusion_expr_value(
                     },
                 },
                 DataScope::Attribute(attrs_id, key) => {
-                    let attrs_payload_type = resolve_attrs_payload_type(attrs_id, otap_batch);
+                    let attrs_payload_type =
+                        resolve_attrs_payload_type(attrs_id, otap_batch, eval_ctx)?;
                     otap_batch
                         .get(attrs_payload_type)
                         .map(|rb| project_attrs(rb, key.as_str(), *attr_key_case_sensitive))
@@ -203,7 +204,8 @@ pub(super) fn eval_datafusion_expr_value(
                         .map(Cow::Owned)
                 }
                 DataScope::AttributesAll(attrs_id) => {
-                    let attrs_payload_type = resolve_attrs_payload_type(attrs_id, otap_batch);
+                    let attrs_payload_type =
+                        resolve_attrs_payload_type(attrs_id, otap_batch, eval_ctx)?;
                     otap_batch.get(attrs_payload_type).map(Cow::Borrowed)
                 }
                 DataScope::StaticScalar => Some(Cow::Borrowed(SCALAR_RECORD_BATCH_INPUT.deref())),
@@ -635,14 +637,22 @@ fn evaluate_with_anyval_partitions(
 pub(crate) fn resolve_attrs_payload_type(
     attrs_id: &AttributesIdentifier,
     otap_batch: &OtapArrowRecords,
-) -> ArrowPayloadType {
+    eval_ctx: &EvalContext<'_>,
+) -> Result<ArrowPayloadType> {
     match *attrs_id {
-        AttributesIdentifier::Root => match otap_batch.root_payload_type() {
+        AttributesIdentifier::Record(RecordScope::Signal) => Ok(match otap_batch.root_payload_type() {
             ArrowPayloadType::Logs => ArrowPayloadType::LogAttrs,
             ArrowPayloadType::Spans => ArrowPayloadType::SpanAttrs,
             _ => ArrowPayloadType::MetricAttrs,
+        }),
+        AttributesIdentifier::Record(RecordScope::Child(ChildRecordKind::DataPoint)) => {
+            eval_ctx.data_point_type.as_ref().map(MetricDataPointType::dp_attrs_payload_type).ok_or(Error::ExecutionError {
+                                cause: format!(
+                                    "Attr access planned with source attrs_id {attrs_id:?} but no data_point_type in eval context",
+                                ),
+                            })
         },
-        AttributesIdentifier::NonRoot(payload_type) => payload_type,
+        AttributesIdentifier::NonRecord(payload_type) => Ok(payload_type),
     }
 }
 
@@ -723,8 +733,8 @@ fn materialize_id_mask_to_value(
         IdMask::Some(_) | IdMask::NotSome(_) => {
             let id_col = match mask_scope {
                 Some(
-                    DataScope::Attribute(AttributesIdentifier::NonRoot(payload_type), _)
-                    | DataScope::AttributesAll(AttributesIdentifier::NonRoot(payload_type)),
+                    DataScope::Attribute(AttributesIdentifier::NonRecord(payload_type), _)
+                    | DataScope::AttributesAll(AttributesIdentifier::NonRecord(payload_type)),
                 ) => match payload_type {
                     ArrowPayloadType::ResourceAttrs => {
                         get_optional_array_from_struct_array_from_record_batch(

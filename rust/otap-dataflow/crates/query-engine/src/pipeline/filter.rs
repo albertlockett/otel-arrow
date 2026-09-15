@@ -71,9 +71,10 @@ impl PipelineStage for FilterPipelineStage {
         let num_rows = root_rb.num_rows();
 
         // Evaluate the ScopedExpr tree to produce a boolean result, then align to root.
+        let eval_context = EvalContext::new(session_context);
         let result = self
             .predicate
-            .execute_as_value(&otap_batch, &EvalContext::new(session_context))?;
+            .execute_as_value(&otap_batch, &eval_context)?;
 
         // Convert the result to a root-aligned BooleanArray selection vector.
         let selection_vec = match result {
@@ -87,7 +88,7 @@ impl PipelineStage for FilterPipelineStage {
                     && !(matches!(scoped_value.scope, DataScope::RootParent(_)))
                     && scoped_value.scope != DataScope::StaticScalar
                 {
-                    align_selection_to_root(Some(scoped_value), &otap_batch)?
+                    align_selection_to_root(Some(scoped_value), &otap_batch, &eval_context)?
                 } else {
                     // extract the BooleanArray from the ScopedValue
                     scoped_value_to_boolean_array(scoped_value.values, num_rows)?
@@ -294,6 +295,7 @@ pub(crate) fn scoped_value_to_boolean_array(
 pub(crate) fn align_selection_to_root(
     result: Option<ScopedValue>,
     otap_batch: &OtapArrowRecords,
+    eval_context: &EvalContext,
 ) -> Result<BooleanArray> {
     let num_rows = otap_batch
         .root_record_batch()
@@ -315,9 +317,12 @@ pub(crate) fn align_selection_to_root(
                 };
 
                 match maybe_attrs_id {
-                    Some(attrs_id) => {
-                        align_selection_vec_from_attrs(scoped_value, &attrs_id, otap_batch)
-                    }
+                    Some(attrs_id) => align_selection_vec_from_attrs(
+                        scoped_value,
+                        &attrs_id,
+                        otap_batch,
+                        eval_context,
+                    ),
                     _ => Err(Error::NotYetSupportedError {
                         message: format!(
                             "alignment from {:?} to root is not yet supported",
@@ -342,6 +347,7 @@ fn align_selection_vec_from_attrs(
     value: ScopedValue,
     attrs_id: &AttributesIdentifier,
     otap_batch: &OtapArrowRecords,
+    eval_context: &EvalContext,
 ) -> Result<ScopedValue> {
     let root_rb = otap_batch
         .root_record_batch()
@@ -369,7 +375,7 @@ fn align_selection_vec_from_attrs(
         })?;
 
     // get the id column from the root batch for this attribute type
-    let attrs_payload_type = resolve_attrs_payload_type(attrs_id, otap_batch);
+    let attrs_payload_type = resolve_attrs_payload_type(attrs_id, otap_batch, eval_context)?;
     let id_col = match UInt16Type::get_id_col_from_parent(root_rb, attrs_payload_type)? {
         Some(MaybeDictArrayAccessor::Native(id_col)) => id_col,
         Some(_) => {

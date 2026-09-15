@@ -1,6 +1,8 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// TODO the module comments are out of date
+
 //! This module contains code used for joining different expression data scopes.
 //!
 //! As the expression evaluates, we may encounter points that need to join data from different
@@ -192,12 +194,12 @@ pub fn join<'a>(
             DataScope::Attribute(attr_id, _),
             DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
         ) => match attr_id {
-            AttributesIdentifier::Root => {
+            AttributesIdentifier::Record(_) => {
                 let join_exec = RootAttrsToRootJoin::new();
                 let join_result = join_exec.join(left, right, otap_batch)?;
                 Ok((join_result, left.data_scope.clone()))
             }
-            AttributesIdentifier::NonRoot(payload_type) => {
+            AttributesIdentifier::NonRecord(payload_type) => {
                 let join_exec = NonRootAttrsToRootReverseJoin::new(*payload_type);
                 let join_result = join_exec.join(left, right, otap_batch)?;
                 Ok((join_result, right.data_scope.clone()))
@@ -244,10 +246,12 @@ pub fn is_one_to_many(
     left_attrs_id: &AttributesIdentifier,
     right_attrs_id: &AttributesIdentifier,
 ) -> bool {
+    // TODO - it might be good to check the payload type of NonRoots here to ensure we're not
+    // just having random payload types in this and making invalid assumptions
     match (left_attrs_id, right_attrs_id) {
-        (AttributesIdentifier::Root, _) => false,
-        (AttributesIdentifier::NonRoot(_), AttributesIdentifier::Root) => true,
-        (AttributesIdentifier::NonRoot(left), AttributesIdentifier::NonRoot(right)) => {
+        (AttributesIdentifier::Record(_), _) => false,
+        (AttributesIdentifier::NonRecord(_), AttributesIdentifier::Record(_)) => true,
+        (AttributesIdentifier::NonRecord(left), AttributesIdentifier::NonRecord(right)) => {
             *left == ArrowPayloadType::ResourceAttrs && *right == ArrowPayloadType::ScopeAttrs
         }
     }
@@ -323,7 +327,7 @@ fn compute_join_alignment(
             DataScope::Attribute(attr_id, _),
             DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
         ) => match attr_id {
-            AttributesIdentifier::Root => {
+            AttributesIdentifier::Record(_) => {
                 let exec = RootAttrsToRootJoin::new();
                 let indices = exec.rows_to_take(left, right, otap_batch)?;
                 Ok((
@@ -331,7 +335,7 @@ fn compute_join_alignment(
                     left.data_scope.clone(),
                 ))
             }
-            AttributesIdentifier::NonRoot(payload_type) => {
+            AttributesIdentifier::NonRecord(payload_type) => {
                 let exec = NonRootAttrsToRootReverseJoin::new(*payload_type);
                 let indices = exec.rows_to_take(left, right, otap_batch)?;
                 Ok((
@@ -657,7 +661,7 @@ fn get_attrs_id_values<'a>(
     attrs_id: &'a AttributesIdentifier,
 ) -> Result<&'a UInt16Array> {
     match attrs_id {
-        AttributesIdentifier::Root => {
+        AttributesIdentifier::Record(_) => {
             let id_col = root_batch
                 .column_by_name(consts::ID)
                 .ok_or_else(|| missing_column_err(consts::ID))?;
@@ -666,7 +670,7 @@ fn get_attrs_id_values<'a>(
                 .downcast_ref::<UInt16Array>()
                 .ok_or_else(|| invalid_column_type_error(id_col.data_type()))?)
         }
-        AttributesIdentifier::NonRoot(payload_type) => {
+        AttributesIdentifier::NonRecord(payload_type) => {
             match payload_type {
                 ArrowPayloadType::ResourceAttrs => {
                     let resource_struct = get_required_struct_array(root_batch, consts::RESOURCE)
@@ -930,8 +934,8 @@ impl JoinExec for RootToAttributesJoin {
 
         // get the ID column for which we should scan for join
         let left_id_col = match self.attrs_id {
-            AttributesIdentifier::Root => &left.ids,
-            AttributesIdentifier::NonRoot(payload_type) => match payload_type {
+            AttributesIdentifier::Record(_) => &left.ids,
+            AttributesIdentifier::NonRecord(payload_type) => match payload_type {
                 ArrowPayloadType::ResourceAttrs => &left.resource_ids,
                 ArrowPayloadType::ScopeAttrs => &left.scope_ids,
                 other => {
@@ -1419,8 +1423,8 @@ impl AttributesAllSelectionVecJoin {
             DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_)
         ) {
             let ids = match attrs_id {
-                AttributesIdentifier::Root => input.ids.as_ref(),
-                AttributesIdentifier::NonRoot(payload) => match payload {
+                AttributesIdentifier::Record(_) => input.ids.as_ref(),
+                AttributesIdentifier::NonRecord(payload) => match payload {
                     ArrowPayloadType::ResourceAttrs => input.resource_ids.as_ref(),
                     ArrowPayloadType::ScopeAttrs => input.scope_ids.as_ref(),
                     _ => {
