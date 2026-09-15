@@ -110,7 +110,7 @@ impl JoinInput {
     pub fn new_with_parent_ids(
         values: ColumnarValue,
         data_scope: Rc<DataScope>,
-        parent_ids: &UInt16Array,
+        parent_ids: ArrayRef,
     ) -> Self {
         Self {
             values,

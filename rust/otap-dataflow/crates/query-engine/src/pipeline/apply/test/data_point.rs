@@ -829,6 +829,44 @@ async fn test_filter_data_points_null_predicate_result() {
     );
 }
 
+#[tokio::test]
+async fn test_assign_to_datapoint_attributes() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = 5
+    }";
+
+    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
+        .unwrap()
+        .pipeline;
+    let mut pipeline = Pipeline::new(pipeline_expr);
+
+    let metrics = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: vec![
+                    NumberDataPoint::build()
+                        .attributes(vec![KeyValue::new("a", AnyValue::new_string("b"))])
+                        .finish(),
+                ],
+            })
+            .finish(),
+    ];
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
+    let result = pipeline.execute(input_batch).await.unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
+        panic!("invalid signal type")
+    };
+
+    println!("{metrics_result:#?}");
+}
+
+// Assign test cases to add:
+// - assign fields
+// - assign when no existing attributes
+// - assign from func call w/ joins, etc?
+
 /// Scenario: try to execute some queries that have valid syntax, but define operations that are
 /// not supported by this query engine (although most will be supported in future)
 /// Guarantees: that the operation returns an expected error instead of inadvertently evaluating

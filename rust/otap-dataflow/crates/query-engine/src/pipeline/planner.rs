@@ -1194,15 +1194,16 @@ impl ColumnAccessor {
                 let column_name = column.get_value();
                 match column_name {
                     ATTRIBUTES_FIELD_NAME => {
-                        if let RecordType::Child(child_kind) = record_type {
-                            return Err(Error::NotYetSupportedError {
-                                message: format!(
-                                    "{child_kind:?} attribute access not yet supported"
-                                ),
-                            });
-                        }
+                        let record_scope = match record_type {
+                            RecordType::Signal => RecordScope::Signal,
+                            RecordType::Child(child) => RecordScope::Child(*child),
+                            RecordType::Attributes => {
+                                todo!("invalid pipeline?")
+                            }
+                        };
+
                         Self::try_from_attrs_key(
-                            AttributesIdentifier::Record(RecordScope::Signal),
+                            AttributesIdentifier::Record(record_scope),
                             &selectors[1..],
                         )
                     }

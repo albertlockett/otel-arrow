@@ -19,14 +19,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, BooleanArray, DictionaryArray, Float64Array, Int64Array, NullArray,
-    RecordBatch, StringArray, StructArray, UInt8Array, UInt16Array,
+    Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, DictionaryArray, Float64Array,
+    Int64Array, NullArray, PrimitiveArray, RecordBatch, StringArray, StructArray, UInt8Array,
+    UInt16Array, UInt32Array,
 };
 use arrow::buffer::BooleanBuffer;
 use arrow::compute::kernels::cmp::{eq, neq};
 use arrow::compute::kernels::merge::merge;
 use arrow::compute::{and_not, cast, filter, max, take};
-use arrow::datatypes::{DataType, Field, Fields, Schema, UInt16Type};
+use arrow::datatypes::{
+    ArrowNativeType, DataType, Field, Fields, Schema, UInt8Type, UInt16Type, UInt32Type,
+};
 use async_trait::async_trait;
 use datafusion::config::ConfigOptions;
 use datafusion::execution::TaskContext;
@@ -42,7 +45,7 @@ use otel_arrow_dfe_pdata::encode::record::array::{
 };
 use otel_arrow_dfe_pdata::error::Error as PdataError;
 use otel_arrow_dfe_pdata::otap::Logs;
-use otel_arrow_dfe_pdata::otap::filter::IdBitmapPool;
+use otel_arrow_dfe_pdata::otap::filter::{IdBitmap, IdBitmapPool};
 use otel_arrow_dfe_pdata::otap::transform::concatenate::{
     Cardinality, FieldInfo, estimate_cardinality,
 };
@@ -70,11 +73,12 @@ use crate::pipeline::expr::join::{
 };
 use crate::pipeline::expr::planner::PlannedOp;
 use crate::pipeline::expr::types::{
-    ExprLogicalType, nested_struct_field_type, root_field_supports_dict_encoding, root_field_type,
+    ExprLogicalType, MetricDataPointType, nested_struct_field_type,
+    root_field_supports_dict_encoding, root_field_type,
 };
 use crate::pipeline::expr::{
-    DataScope, LeafEval, RecordScope, RootParentStruct, SCALAR_RECORD_BATCH_INPUT, ScopedExpr,
-    ScopedValue, VALUE_COLUMN_NAME,
+    ChildRecordKind, DataScope, LeafEval, RecordScope, RootParentStruct, SCALAR_RECORD_BATCH_INPUT,
+    ScopedExpr, ScopedValue, VALUE_COLUMN_NAME,
 };
 use crate::pipeline::planner::{AttributesIdentifier, ColumnAccessor, RecordType};
 use crate::pipeline::project::anyval::{
@@ -587,20 +591,11 @@ impl AssignPipelineStage {
         Ok(otap_batch)
     }
 
-    fn assign_to_attributes(
-        &mut self,
-        mut otap_batch: OtapArrowRecords,
-        eval_results: &mut [Option<ScopedValue>],
+    fn root_assign_attr_inputs<'a>(
+        otap_batch: &'a OtapArrowRecords,
+        root_record_batch: &'a RecordBatch,
         dest_attrs_id: AttributesIdentifier,
-    ) -> Result<OtapArrowRecords> {
-        let root_record_batch = match otap_batch.root_record_batch() {
-            Some(root_rb) => root_rb,
-            None => {
-                // nothing to do
-                return Ok(otap_batch);
-            }
-        };
-
+    ) -> Result<(Cow<'a, RecordBatch>, ArrowPayloadType, Option<ArrayRef>)> {
         let (attrs_payload_type, id_col) = match dest_attrs_id {
             AttributesIdentifier::Record(RecordScope::Signal) => {
                 let attrs_payload_type = match otap_batch {
@@ -662,16 +657,35 @@ impl AssignPipelineStage {
             }
         };
 
+        Ok((attrs_record_batch, attrs_payload_type, id_col.cloned()))
+    }
+
+    fn assign_to_attributes<T: ArrowPrimitiveType>(
+        &mut self,
+        otap_batch: &OtapArrowRecords,
+        id_col: Option<ArrayRef>,
+        attrs_payload_type: ArrowPayloadType,
+        attrs_record_batch: Cow<'_, RecordBatch>,
+        eval_results: &mut [Option<ScopedValue>],
+        dest_attrs_id: AttributesIdentifier,
+    ) -> Result<RecordBatch>
+    where
+        u32: From<<T as ArrowPrimitiveType>::Native>,
+    {
         let mut parent_id_set = self.id_bitmap_pool.acquire();
         if let Some(id_col) = id_col {
             let id_col = id_col
                 .as_any()
-                .downcast_ref::<UInt16Array>()
-                .ok_or_else(|| Error::ExecutionError {
-                    cause: format!(
-                        "invalid ID column. expected u16 type, found {:?}",
-                        id_col.data_type()
-                    ),
+                .downcast_ref::<PrimitiveArray<T>>()
+                .ok_or_else(|| {
+                    println!("here");
+                    Error::ExecutionError {
+                        // TODO - this is the wrong expected error type
+                        cause: format!(
+                            "invalid ID column. expected u16 type, found {:?}",
+                            id_col.data_type()
+                        ),
+                    }
                 })?;
             parent_id_set.populate(id_col.iter().flatten().map(|i| i.into()));
         }
@@ -719,35 +733,138 @@ impl AssignPipelineStage {
             //
             let existing_key_mask = eq(&key_column, &StringArray::new_scalar(attrs_key))?;
             let update_parent_ids = filter(&parent_ids_col, &existing_key_mask)?;
-            let update_parent_ids_u16 = update_parent_ids
-                .as_any()
-                .downcast_ref::<UInt16Array>()
-                .ok_or_else(|| Error::ExecutionError {
-                    cause: format!(
-                        "invalid ID column. expected u16 type, found {:?}",
-                        update_parent_ids.data_type()
-                    ),
-                })?;
             let mut update_parent_id_set = self.id_bitmap_pool.acquire();
-            update_parent_id_set.populate(update_parent_ids_u16.iter().flatten().map(|i| i.into()));
 
-            let total = parent_id_set.len() as usize;
-            let mut parent_ids = vec![0u16; total];
-            let mut curr_idx = 0;
-            for id in update_parent_ids_u16.iter().flatten() {
-                parent_ids[curr_idx] = id;
-                curr_idx += 1;
-            }
-            // now put in all the IDS for which we need to insert
-            for id in parent_id_set.iter() {
-                if update_parent_id_set.contains(id) {
-                    continue;
+            let parent_ids: PrimitiveArray<T> = if let Some(parent_id_col_primitive) =
+                update_parent_ids.as_primitive_opt::<T>()
+            {
+                update_parent_id_set
+                    .populate(parent_id_col_primitive.iter().flatten().map(|i| i.into()));
+
+                // TODO - would an invalid batch containing many of the same attribute cause this
+                // to panic? I believe YES -- need to fix
+
+                let total = parent_id_set.len() as usize;
+                let mut parent_ids = vec![T::Native::default(); total];
+                let mut curr_idx = 0;
+                // TODO - if there are no nulls here, we could just copy the entire values buffer
+                // which might improve performance (be sure to check what happens when sliced, etc)
+                for id in parent_id_col_primitive.iter().flatten() {
+                    parent_ids[curr_idx] = id;
+                    curr_idx += 1;
                 }
-                parent_ids[curr_idx] = id as u16;
-                curr_idx += 1;
-            }
-            self.id_bitmap_pool.release(update_parent_id_set);
-            let parent_ids = UInt16Array::from(parent_ids);
+
+                // TODO - look into like using binary op (parent_id and !update ?) to improve this perf?
+                for id in parent_id_set.iter() {
+                    if update_parent_id_set.contains(id) {
+                        continue;
+                    }
+                    // TODO safety comment
+                    parent_ids[curr_idx] =
+                        T::Native::from_usize(id as usize).expect("value in range");
+                    curr_idx += 1;
+                }
+                self.id_bitmap_pool.release(update_parent_id_set);
+                // TODO construct the scalar buffer directly instead of iterating
+                PrimitiveArray::<T>::from_iter_values(parent_ids)
+            } else if let Some(parent_id_col_dict) =
+                update_parent_ids.as_dictionary_opt::<UInt8Type>()
+            {
+                if let Some(typed_dict) = parent_id_col_dict.downcast_dict::<PrimitiveArray<T>>() {
+                    let total = parent_id_set.len() as usize;
+                    let mut parent_ids = vec![T::Native::default(); total];
+                    let mut curr_idx = 0;
+                    // TODO - if there are no nulls here, we could just copy the entire values buffer
+                    // which might improve performance (be sure to check what happens when sliced, etc)
+                    for id in typed_dict.into_iter().flatten() {
+                        parent_ids[curr_idx] = id;
+                        curr_idx += 1;
+                    }
+
+                    // TODO - look into like using binary op (parent_id and !update ?) to improve this perf?
+                    for id in parent_id_set.iter() {
+                        if update_parent_id_set.contains(id) {
+                            continue;
+                        }
+                        // TODO safety comment
+                        parent_ids[curr_idx] =
+                            T::Native::from_usize(id as usize).expect("value in range");
+                        curr_idx += 1;
+                    }
+                    self.id_bitmap_pool.release(update_parent_id_set);
+                    // TODO construct the scalar buffer directly instead of iterating
+                    PrimitiveArray::<T>::from_iter_values(parent_ids)
+                } else {
+                    todo!()
+                }
+                // if let Some(dict_values) = parent_id_col_dict.values().as_primitive_opt::<T>() {
+                //     // TODO - not sure this is right if there are orphaned values ...
+                //     update_parent_id_set.populate(dict_values.iter().flatten().map(|i| i.into()));
+
+                //     todo!()
+                // } else {
+                //     // invalid dictionary values
+                //     todo!()
+                // }
+            } else {
+                // invalid type column
+                todo!()
+            };
+
+            // let parent_ids: ArrayRef = match update_parent_ids.data_type() {
+            //     DataType::UInt16 => {
+            //         let update_parent_ids_u16 = update_parent_ids
+            //             .as_any()
+            //             .downcast_ref::<UInt16Array>()
+            //             .ok_or_else(|| Error::ExecutionError {
+            //                 cause: format!(
+            //                     "invalid parent column. expected u16 type, found {:?}",
+            //                     update_parent_ids.data_type()
+            //                 ),
+            //             })?;
+            //         update_parent_id_set
+            //             .populate(update_parent_ids_u16.iter().flatten().map(|i| i.into()));
+
+            //         let total = parent_id_set.len() as usize;
+            //         let mut parent_ids = vec![0u16; total];
+            //         let mut curr_idx = 0;
+            //         for id in update_parent_ids_u16.iter().flatten() {
+            //             parent_ids[curr_idx] = id;
+            //             curr_idx += 1;
+            //         }
+            //         // now put in all the IDS for which we need to insert
+            //         for id in parent_id_set.iter() {
+            //             if update_parent_id_set.contains(id) {
+            //                 continue;
+            //             }
+            //             parent_ids[curr_idx] = id as u16;
+            //             curr_idx += 1;
+            //         }
+            //         self.id_bitmap_pool.release(update_parent_id_set);
+            //         Arc::new(UInt16Array::from(parent_ids))
+            //     }
+            //     DataType::UInt32 => {
+            //         todo!("handle this")
+            //     }
+            //     DataType::Dictionary(_, v) => match v.as_ref() {
+            //         DataType::UInt32 => {
+            //             let update_parent_ids_i = update_parent_ids.as_any_dictionary();
+            //             let dict_values = update_parent_ids_i
+            //                 .values()
+            //                 .as_any()
+            //                 .downcast_ref::<UInt32Array>()
+            //                 // TODO safety comment
+            //                 .expect("can downcast");
+            //             todo!()
+            //         }
+            //         _ => {
+            //             todo!()
+            //         }
+            //     },
+            //     _ => {
+            //         todo!()
+            //     }
+            // };
 
             // Attempt to coerce the AnyValue into a single column. In this case, we do this as an
             // optimization: this makes the join faster because we can take fewer columns, and it
@@ -777,7 +894,8 @@ impl AssignPipelineStage {
                 let left_join_input = &JoinInput::new_with_parent_ids(
                     ColumnarValue::Scalar(ScalarValue::Null), // empty placeholder,
                     Rc::clone(&self.dest_scopes[i]),
-                    &parent_ids,
+                    // TODO - annoying to have to make new Arc here just for this
+                    Arc::new(parent_ids.clone()),
                 );
 
                 let vals_take_indices = match eval_result.data_scope.as_ref() {
@@ -851,11 +969,8 @@ impl AssignPipelineStage {
 
         self.id_bitmap_pool.release(parent_id_set);
 
-        // replace attributes batch
         let new_attrs = upsert_attributes(&attrs_record_batch, &attrs_upserts)?;
-        otap_batch.set(attrs_payload_type, new_attrs)?;
-
-        Ok(otap_batch)
+        Ok(new_attrs)
     }
 
     fn assign_to_nested_attributes(
@@ -952,7 +1067,8 @@ impl AssignPipelineStage {
                 let left_join_input = &JoinInput::new_with_parent_ids(
                     ColumnarValue::Scalar(ScalarValue::Null),
                     Rc::clone(&self.dest_scopes[i]),
-                    update_parent_ids_u16,
+                    // TODO ugh the new Arc!
+                    Arc::new(update_parent_ids_u16.clone()),
                 );
 
                 let vals_take_indices = match eval_result.data_scope.as_ref() {
@@ -1013,6 +1129,10 @@ impl AssignPipelineStage {
 
         Ok(otap_batch)
     }
+
+    // fn build_upsert_input<T: ArrowPrimitiveType>(
+    //     update_parent_id_set: &IdBitmap,
+    // )
 
     /// Fills in any nulls in the root batch's ID column with newly assigned IDs.
     ///
@@ -1134,15 +1254,37 @@ impl PipelineStage for AssignPipelineStage {
                 self.fill_root_id_column_nulls(&mut otap_batch, exec_state)?;
             }
 
+            let root_record_batch = match otap_batch.root_record_batch() {
+                Some(root_rb) => root_rb,
+                None => {
+                    // nothing to do
+                    return Ok(otap_batch);
+                }
+            };
+
             let mut eval_results = Vec::new();
             for source in &mut self.sources {
                 let eval_result =
                     source.execute_as_value(&otap_batch, &EvalContext::new(session_context))?;
                 eval_results.push(eval_result);
             }
-            let result = self.assign_to_attributes(otap_batch, &mut eval_results, *attrs_id)?;
 
-            return Ok(result);
+            // TODO - is this is an ugly signature?
+            let (attrs_record_batch, attrs_payload_type, id_column) =
+                Self::root_assign_attr_inputs(&otap_batch, root_record_batch, *attrs_id)?;
+
+            // TODO - is this now an ugly signature?
+            let new_attrs = self.assign_to_attributes::<UInt16Type>(
+                &otap_batch,
+                id_column,
+                attrs_payload_type,
+                attrs_record_batch,
+                &mut eval_results,
+                *attrs_id,
+            )?;
+
+            otap_batch.set(attrs_payload_type, new_attrs)?;
+            return Ok(otap_batch);
         }
 
         if let ColumnAccessor::NestedAttribute(attrs_id, _, _) = &self.dest_columns[0] {
@@ -1509,8 +1651,75 @@ impl PipelineStage for AssignPipelineStage {
         )?)
     }
 
+    async fn execute_on_metric_data_points(
+        &mut self,
+        mut otap_batch: OtapArrowRecords,
+        session_ctx: &SessionContext,
+        config_options: &ConfigOptions,
+        task_context: Arc<TaskContext>,
+        exec_state: &mut ExecutionState,
+    ) -> Result<OtapArrowRecords> {
+        for data_point_type in MetricDataPointType::all() {
+            let dp_payload_type = data_point_type.payload_type();
+
+            let eval_ctx = EvalContext::new_for_metrics_data_points(data_point_type, session_ctx);
+
+            // TODO - this is copied from Self::execute, we might want to consolidate the impls
+
+            // if we're assigning to attributes, do it as a bulk attribute upsert for best performance
+            if let ColumnAccessor::Attributes(attrs_id, _) = &self.dest_columns[0] {
+                // TODO - need to fill the parent_id column
+                // if matches!(attrs_id, AttributesIdentifier::Record(_)) {
+                //     self.fill_root_id_column_nulls(&mut otap_batch, exec_state)?;
+                // }
+
+                let Some(metrics_dp_rb) = otap_batch.get(dp_payload_type) else {
+                    // nothing to do
+                    continue;
+                };
+
+                let mut eval_results = Vec::new();
+                for source in &mut self.sources {
+                    let eval_result = source.execute_as_value(&otap_batch, &eval_ctx)?;
+                    eval_results.push(eval_result);
+                }
+
+                let attrs_payload_type = data_point_type.dp_attrs_payload_type();
+                let attrs_record_batch = match otap_batch.get(attrs_payload_type) {
+                    Some(dp_attrs) => Cow::Borrowed(dp_attrs),
+                    None => {
+                        todo!()
+                    }
+                };
+
+                let id_col = metrics_dp_rb.column_by_name(consts::ID);
+
+                let new_attrs = self.assign_to_attributes::<UInt32Type>(
+                    &otap_batch,
+                    id_col.cloned(),
+                    attrs_payload_type,
+                    attrs_record_batch,
+                    &mut eval_results,
+                    *attrs_id,
+                )?;
+
+                otap_batch.set(attrs_payload_type, new_attrs)?;
+                continue;
+            }
+
+            todo!("Other assignments");
+        }
+
+        Ok(otap_batch)
+    }
+
     fn supports_exec_on(&self, record_type: &RecordType) -> bool {
-        matches!(record_type, RecordType::Attributes | RecordType::Signal)
+        matches!(
+            record_type,
+            RecordType::Attributes
+                | RecordType::Signal
+                | RecordType::Child(ChildRecordKind::DataPoint)
+        )
     }
 
     fn init_state_for_conditional_branch(
@@ -1759,12 +1968,12 @@ impl NextIdTracker {
 ///
 /// 3. Extract the concrete value column for this type from the struct.
 ///
-fn decompose_any_value_upsert<'a>(
+fn decompose_any_value_upsert<'a, T: ArrowPrimitiveType>(
     attrs_key: &'a str,
     existing_key_mask: &BooleanArray,
     any_value_arr: &ArrayRef,
-    parent_ids: &UInt16Array,
-) -> Result<Vec<AttributeUpsert<'a, UInt16Type>>> {
+    parent_ids: &PrimitiveArray<T>,
+) -> Result<Vec<AttributeUpsert<'a, T>>> {
     let struct_arr = any_value_arr
         .as_any()
         .downcast_ref::<StructArray>()
@@ -1816,6 +2025,8 @@ fn decompose_any_value_upsert<'a>(
 
         let new_type_match = eq(new_types, &UInt8Array::new_scalar(discriminant))?;
 
+        // TODO - we roundtrip to Arc w/ clone here annoyingly ...
+
         // 1. Build sub-mask: existing_key_mask AND existing_type == discriminant.
         let typed_existing_key_mask = merge(
             existing_key_mask,
@@ -1836,7 +2047,7 @@ fn decompose_any_value_upsert<'a>(
 
         let filtered_parent_ids = filtered_parent_ids
             .as_any()
-            .downcast_ref::<UInt16Array>()
+            .downcast_ref::<PrimitiveArray<T>>()
             .ok_or_else(|| Error::ExecutionError {
                 cause: "filtered parent_ids is not UInt16".into(),
             })?
@@ -1890,7 +2101,7 @@ fn decompose_any_value_upsert<'a>(
         let filtered_parent_ids = filter(parent_ids, &empty)?;
         let filtered_parent_ids = filtered_parent_ids
             .as_any()
-            .downcast_ref::<UInt16Array>()
+            .downcast_ref::<PrimitiveArray<T>>()
             .ok_or_else(|| Error::ExecutionError {
                 cause: "filtered parent_ids is not UInt16".into(),
             })?
