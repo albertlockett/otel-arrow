@@ -23,7 +23,7 @@ use arrow::array::{
     Int64Array, NullArray, PrimitiveArray, RecordBatch, StringArray, StructArray, UInt8Array,
     UInt16Array, UInt32Array,
 };
-use arrow::buffer::BooleanBuffer;
+use arrow::buffer::{BooleanBuffer, ScalarBuffer};
 use arrow::compute::kernels::cmp::{eq, neq};
 use arrow::compute::kernels::merge::merge;
 use arrow::compute::{and_not, cast, filter, max, take};
@@ -733,138 +733,12 @@ impl AssignPipelineStage {
             //
             let existing_key_mask = eq(&key_column, &StringArray::new_scalar(attrs_key))?;
             let update_parent_ids = filter(&parent_ids_col, &existing_key_mask)?;
-            let mut update_parent_id_set = self.id_bitmap_pool.acquire();
 
-            let parent_ids: PrimitiveArray<T> = if let Some(parent_id_col_primitive) =
-                update_parent_ids.as_primitive_opt::<T>()
-            {
-                update_parent_id_set
-                    .populate(parent_id_col_primitive.iter().flatten().map(|i| i.into()));
-
-                // TODO - would an invalid batch containing many of the same attribute cause this
-                // to panic? I believe YES -- need to fix
-
-                let total = parent_id_set.len() as usize;
-                let mut parent_ids = vec![T::Native::default(); total];
-                let mut curr_idx = 0;
-                // TODO - if there are no nulls here, we could just copy the entire values buffer
-                // which might improve performance (be sure to check what happens when sliced, etc)
-                for id in parent_id_col_primitive.iter().flatten() {
-                    parent_ids[curr_idx] = id;
-                    curr_idx += 1;
-                }
-
-                // TODO - look into like using binary op (parent_id and !update ?) to improve this perf?
-                for id in parent_id_set.iter() {
-                    if update_parent_id_set.contains(id) {
-                        continue;
-                    }
-                    // TODO safety comment
-                    parent_ids[curr_idx] =
-                        T::Native::from_usize(id as usize).expect("value in range");
-                    curr_idx += 1;
-                }
-                self.id_bitmap_pool.release(update_parent_id_set);
-                // TODO construct the scalar buffer directly instead of iterating
-                PrimitiveArray::<T>::from_iter_values(parent_ids)
-            } else if let Some(parent_id_col_dict) =
-                update_parent_ids.as_dictionary_opt::<UInt8Type>()
-            {
-                if let Some(typed_dict) = parent_id_col_dict.downcast_dict::<PrimitiveArray<T>>() {
-                    let total = parent_id_set.len() as usize;
-                    let mut parent_ids = vec![T::Native::default(); total];
-                    let mut curr_idx = 0;
-                    // TODO - if there are no nulls here, we could just copy the entire values buffer
-                    // which might improve performance (be sure to check what happens when sliced, etc)
-                    for id in typed_dict.into_iter().flatten() {
-                        parent_ids[curr_idx] = id;
-                        curr_idx += 1;
-                    }
-
-                    // TODO - look into like using binary op (parent_id and !update ?) to improve this perf?
-                    for id in parent_id_set.iter() {
-                        if update_parent_id_set.contains(id) {
-                            continue;
-                        }
-                        // TODO safety comment
-                        parent_ids[curr_idx] =
-                            T::Native::from_usize(id as usize).expect("value in range");
-                        curr_idx += 1;
-                    }
-                    self.id_bitmap_pool.release(update_parent_id_set);
-                    // TODO construct the scalar buffer directly instead of iterating
-                    PrimitiveArray::<T>::from_iter_values(parent_ids)
-                } else {
-                    todo!()
-                }
-                // if let Some(dict_values) = parent_id_col_dict.values().as_primitive_opt::<T>() {
-                //     // TODO - not sure this is right if there are orphaned values ...
-                //     update_parent_id_set.populate(dict_values.iter().flatten().map(|i| i.into()));
-
-                //     todo!()
-                // } else {
-                //     // invalid dictionary values
-                //     todo!()
-                // }
-            } else {
-                // invalid type column
-                todo!()
-            };
-
-            // let parent_ids: ArrayRef = match update_parent_ids.data_type() {
-            //     DataType::UInt16 => {
-            //         let update_parent_ids_u16 = update_parent_ids
-            //             .as_any()
-            //             .downcast_ref::<UInt16Array>()
-            //             .ok_or_else(|| Error::ExecutionError {
-            //                 cause: format!(
-            //                     "invalid parent column. expected u16 type, found {:?}",
-            //                     update_parent_ids.data_type()
-            //                 ),
-            //             })?;
-            //         update_parent_id_set
-            //             .populate(update_parent_ids_u16.iter().flatten().map(|i| i.into()));
-
-            //         let total = parent_id_set.len() as usize;
-            //         let mut parent_ids = vec![0u16; total];
-            //         let mut curr_idx = 0;
-            //         for id in update_parent_ids_u16.iter().flatten() {
-            //             parent_ids[curr_idx] = id;
-            //             curr_idx += 1;
-            //         }
-            //         // now put in all the IDS for which we need to insert
-            //         for id in parent_id_set.iter() {
-            //             if update_parent_id_set.contains(id) {
-            //                 continue;
-            //             }
-            //             parent_ids[curr_idx] = id as u16;
-            //             curr_idx += 1;
-            //         }
-            //         self.id_bitmap_pool.release(update_parent_id_set);
-            //         Arc::new(UInt16Array::from(parent_ids))
-            //     }
-            //     DataType::UInt32 => {
-            //         todo!("handle this")
-            //     }
-            //     DataType::Dictionary(_, v) => match v.as_ref() {
-            //         DataType::UInt32 => {
-            //             let update_parent_ids_i = update_parent_ids.as_any_dictionary();
-            //             let dict_values = update_parent_ids_i
-            //                 .values()
-            //                 .as_any()
-            //                 .downcast_ref::<UInt32Array>()
-            //                 // TODO safety comment
-            //                 .expect("can downcast");
-            //             todo!()
-            //         }
-            //         _ => {
-            //             todo!()
-            //         }
-            //     },
-            //     _ => {
-            //         todo!()
-            //     }
-            // };
+            let parent_ids: PrimitiveArray<T> = create_upsert_attrs_parent_id_array(
+                &mut self.id_bitmap_pool,
+                &parent_id_set,
+                &update_parent_ids,
+            )?;
 
             // Attempt to coerce the AnyValue into a single column. In this case, we do this as an
             // optimization: this makes the join faster because we can take fewer columns, and it
@@ -1950,6 +1824,85 @@ impl NextIdTracker {
         self.curr_max = Some(next_id);
         Some(next_id)
     }
+}
+
+/// TODO commentary
+fn create_upsert_attrs_parent_id_array<T: ArrowPrimitiveType>(
+    id_bitmap_pool: &mut IdBitmapPool,
+    parent_id_set: &IdBitmap,
+    update_parent_ids: &ArrayRef,
+) -> Result<PrimitiveArray<T>>
+where
+    u32: From<<T as ArrowPrimitiveType>::Native>,
+{
+    let mut update_parent_id_set = id_bitmap_pool.acquire();
+    let upsert_parent_ids = if let Some(parent_id_col_primitive) =
+        update_parent_ids.as_primitive_opt::<T>()
+    {
+        update_parent_id_set.populate(parent_id_col_primitive.iter().flatten().map(|i| i.into()));
+        populate_upsert_attr_parent_id_values::<T, _>(
+            parent_id_col_primitive.iter(),
+            parent_id_set,
+            &update_parent_id_set,
+        )
+    } else if let Some(parent_id_col_dict) = update_parent_ids.as_dictionary_opt::<UInt8Type>() {
+        if let Some(typed_dict) = parent_id_col_dict.downcast_dict::<PrimitiveArray<T>>() {
+            update_parent_id_set
+                .populate(typed_dict.clone().into_iter().flatten().map(|i| i.into()));
+            populate_upsert_attr_parent_id_values::<T, _>(
+                typed_dict.into_iter(),
+                parent_id_set,
+                &update_parent_id_set,
+            )
+        } else {
+            todo!()
+        }
+    } else {
+        // invalid type column
+        todo!()
+    };
+
+    id_bitmap_pool.release(update_parent_id_set);
+    Ok(PrimitiveArray::new(
+        ScalarBuffer::from(upsert_parent_ids),
+        None,
+    ))
+}
+
+// TODO - bad function name and commentary
+fn populate_upsert_attr_parent_id_values<
+    T: ArrowPrimitiveType,
+    I: Iterator<Item = Option<T::Native>>,
+>(
+    parent_id_col_iter: I,
+    parent_id_set: &IdBitmap,
+    update_parent_id_set: &IdBitmap,
+) -> Vec<T::Native>
+where
+    u32: From<T::Native>,
+{
+    // TODO - validate that an invalid batch containing duplicate attr keys wouldn't
+    // cause a panic here
+    let mut upsert_attr_parent_ids = vec![T::Native::default(); parent_id_set.len() as usize];
+    let mut curr_idx = 0;
+
+    for id in parent_id_col_iter.flatten() {
+        upsert_attr_parent_ids[curr_idx] = id;
+        curr_idx += 1
+    }
+
+    // TODO - look into like using binary op (parent_id and !update ?) to improve this perf?
+    for id in parent_id_set.iter() {
+        if update_parent_id_set.contains(id) {
+            continue;
+        }
+
+        // TODO safety comment
+        upsert_attr_parent_ids[curr_idx] =
+            T::Native::from_usize(id as usize).expect("value in range")
+    }
+
+    upsert_attr_parent_ids
 }
 
 /// Decompose an AnyValue struct result into one [`AttributeUpsert`] per distinct value type.

@@ -31,15 +31,19 @@
 //!   any OTAP batches that uses u32 IDs. Eventually we'll need to support this, when the engine
 //!   behaviour becomes more sophisticated.
 //!
+use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, BooleanArray, Int32Array, RecordBatch, StructArray, UInt16Array,
+    Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, Int32Array, PrimitiveArray,
+    RecordBatch, StructArray, UInt16Array,
 };
 use arrow::buffer::{BooleanBuffer, MutableBuffer};
 use arrow::compute::{filter, take};
-use arrow::datatypes::{DataType, Field, Fields, Schema, UInt16Type};
+use arrow::datatypes::{
+    ArrowNativeType, DataType, Field, Fields, Schema, UInt8Type, UInt16Type, UInt32Type,
+};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::scalar::ScalarValue;
 use otel_arrow_dfe_pdata::OtapArrowRecords;
@@ -610,14 +614,66 @@ fn extract_u16_array<'a>(
         .ok_or_else(|| invalid_column_type_error(array.data_type()))
 }
 
+// TODO rename b/c this is a special case
 /// Helper function to perform a simple left-to-right join using parent IDs
 /// Builds a lookup from right_ids, scans left_ids, and creates a take array
-fn build_simple_join_indices(left_ids: &UInt16Array, right_lookup: &IdJoinLookup) -> Int32Array {
-    let mut to_take = Int32Array::builder(left_ids.len());
+fn build_simple_join_indices(left_ids: &UInt16Array, right_lookup: &U16IdJoinLookup) -> Int32Array {
+    build_simple_join_indices_from_iter(left_ids.iter(), right_lookup)
+}
 
-    left_ids.iter().for_each(|id| {
+fn try_build_simple_join_ids<T: IdJoinLookupType, const PAGE_SIZE: usize>(
+    left_ids: Option<&ArrayRef>,
+    column_name: &str,
+    right_lookup: &IdJoinLookup<T, PAGE_SIZE>,
+) -> Result<Int32Array>
+where
+    T: From<<<T as IdJoinLookupType>::ArrowType as ArrowPrimitiveType>::Native>,
+{
+    let array = left_ids.ok_or_else(|| missing_column_err(column_name))?;
+
+    if let Some(ids_as_primitive) = array.as_primitive_opt::<T::ArrowType>() {
+        Ok(build_simple_join_indices_from_iter(
+            ids_as_primitive.iter(),
+            right_lookup,
+        ))
+    } else if let Some(ids_as_dict) = array.as_dictionary_opt::<UInt8Type>() {
+        if let Some(typed_dict) = ids_as_dict.downcast_dict::<PrimitiveArray<T::ArrowType>>() {
+            Ok(build_simple_join_indices_from_iter(
+                typed_dict.into_iter(),
+                right_lookup,
+            ))
+        } else {
+            todo!("bad dict vals")
+        }
+    } else if let Some(ids_as_dict) = array.as_dictionary_opt::<UInt16Type>() {
+        if let Some(typed_dict) = ids_as_dict.downcast_dict::<PrimitiveArray<T::ArrowType>>() {
+            Ok(build_simple_join_indices_from_iter::<T, _, _>(
+                typed_dict.into_iter(),
+                right_lookup,
+            ))
+        } else {
+            todo!("bad dict vals")
+        }
+    } else {
+        todo!("bad type")
+    }
+}
+
+fn build_simple_join_indices_from_iter<
+    T: IdJoinLookupType,
+    I: ExactSizeIterator<Item = Option<<T::ArrowType as ArrowPrimitiveType>::Native>>,
+    const PAGE_SIZE: usize,
+>(
+    left_ids: I,
+    right_lookup: &IdJoinLookup<T, PAGE_SIZE>,
+) -> Int32Array
+where
+    T: From<<<T as IdJoinLookupType>::ArrowType as ArrowPrimitiveType>::Native>,
+{
+    let mut to_take = Int32Array::builder(left_ids.len());
+    left_ids.for_each(|id| {
         if let Some(left_id) = id {
-            let right_index = right_lookup.lookup(left_id).map(|i| i as i32);
+            let right_index = right_lookup.lookup(left_id.into()).map(|i| i as i32);
             to_take.append_option(right_index);
         } else {
             to_take.append_null();
@@ -632,9 +688,9 @@ fn build_simple_join_indices(left_ids: &UInt16Array, right_lookup: &IdJoinLookup
 /// intermediary (e.g., resource attrs + scope attrs)
 fn build_two_hop_join_indices(
     left_ids: &UInt16Array,
-    intermediate_lookup: &IdJoinLookup,
+    intermediate_lookup: &U16IdJoinLookup,
     right_root_ids: &UInt16Array,
-    right_lookup: &IdJoinLookup,
+    right_lookup: &U16IdJoinLookup,
 ) -> Int32Array {
     let mut to_take = Int32Array::builder(left_ids.len());
 
@@ -930,7 +986,7 @@ impl JoinExec for RootToAttributesJoin {
     ) -> Result<Int32Array> {
         // build the lookup for the right side of the join by parent ID
         let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
-        let right_lookup = IdJoinLookup::new(right_parent_ids);
+        let right_lookup = U16IdJoinLookup::new_from_primitive(right_parent_ids);
 
         // get the ID column for which we should scan for join
         let left_id_col = match self.attrs_id {
@@ -986,7 +1042,7 @@ impl JoinExec for RootAttrsToRootJoin {
     ) -> Result<Int32Array> {
         // build the lookup for the right side of the join by ID column
         let right_ids = extract_u16_array(right.ids.as_ref(), consts::ID)?;
-        let right_lookup = IdJoinLookup::new(right_ids);
+        let right_lookup = U16IdJoinLookup::new_from_primitive(right_ids);
 
         // scan the parent_ID column from the attributes to determine which rows from the
         // right values should be taken
@@ -1039,7 +1095,7 @@ impl JoinExec for NonRootAttrsToRootReverseJoin {
     ) -> Result<Int32Array> {
         // build a lookup of ID to index for the left side
         let left_parent_ids = extract_u16_array(left.parent_ids.as_ref(), consts::PARENT_ID)?;
-        let left_lookup = IdJoinLookup::new(left_parent_ids);
+        let left_lookup = U16IdJoinLookup::new_from_primitive(left_parent_ids);
 
         let right_ids = match self.attrs_payload_type {
             ArrowPayloadType::ResourceAttrs => right.resource_ids.as_ref(),
@@ -1170,14 +1226,27 @@ impl JoinExec for AttributeToSameAttributeJoin {
         right: &JoinInput,
         _otap_batch: &OtapArrowRecords,
     ) -> Result<Int32Array> {
-        // build a mapping of right-side parent_ids to right-side indices
-        let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
-        let right_lookup = IdJoinLookup::new(right_parent_ids);
+        // TODO commentary on how we know it's u32 ids b/c of this
+        let is_u32_ids = matches!(
+            left.data_scope.as_ref(),
+            DataScope::Attribute(AttributesIdentifier::Record(RecordScope::Child(_)), _)
+        );
+        // TODO - the u16 path should proceed the same way as the u32 path
+        if is_u32_ids {
+            // TODO - it's a bit messy to have to call UInt32Type for this considering the ID lookup type is already U32
+            let right_lookup =
+                U32IdJoinLookup::try_new_from_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
+            try_build_simple_join_ids(left.parent_ids.as_ref(), consts::PARENT_ID, &right_lookup)
+        } else {
+            // build a mapping of right-side parent_ids to right-side indices
+            let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
+            let right_lookup = U16IdJoinLookup::new_from_primitive(right_parent_ids);
 
-        // determine which rows to take from the right side values
-        let left_parent_ids = extract_u16_array(left.parent_ids.as_ref(), consts::PARENT_ID)?;
+            // determine which rows to take from the right side values
+            let left_parent_ids = extract_u16_array(left.parent_ids.as_ref(), consts::PARENT_ID)?;
 
-        Ok(build_simple_join_indices(left_parent_ids, &right_lookup))
+            Ok(build_simple_join_indices(left_parent_ids, &right_lookup))
+        }
     }
 
     fn join(
@@ -1225,7 +1294,7 @@ impl JoinExec for AttributeToDifferentAttributeJoin {
     ) -> Result<Int32Array> {
         // build mapping of the right side parent_id to right side index
         let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
-        let right_lookup = IdJoinLookup::new(right_parent_ids);
+        let right_lookup = U16IdJoinLookup::new_from_primitive(right_parent_ids);
 
         // get root batch and extract the id columns we need
         let root_batch = otap_batch
@@ -1238,7 +1307,7 @@ impl JoinExec for AttributeToDifferentAttributeJoin {
         let right_root_ids = get_attrs_id_values(root_batch, &self.right)?;
 
         // build mapping from left root id -> root index to use as bridge
-        let inter_join_lookup = IdJoinLookup::new(left_root_ids);
+        let inter_join_lookup = U16IdJoinLookup::new_from_primitive(left_root_ids);
 
         // determine indices of right side values to take
         let left_parent_ids = extract_u16_array(left.parent_ids.as_ref(), consts::PARENT_ID)?;
@@ -1294,7 +1363,7 @@ impl JoinExec for AttributeToDifferentAttributeReverseJoin {
     ) -> Result<Int32Array> {
         // build mapping of the left side parent_id to left side index
         let left_parent_ids = extract_u16_array(left.parent_ids.as_ref(), consts::PARENT_ID)?;
-        let left_lookup = IdJoinLookup::new(left_parent_ids);
+        let left_lookup = U16IdJoinLookup::new_from_primitive(left_parent_ids);
 
         // get root batch and extract the id columns we need
         let root_batch = otap_batch
@@ -1307,7 +1376,7 @@ impl JoinExec for AttributeToDifferentAttributeReverseJoin {
         let right_root_ids = get_attrs_id_values(root_batch, &self.right)?;
 
         // build mapping from right root id -> root index to use as bridge
-        let inter_join_lookup = IdJoinLookup::new(right_root_ids);
+        let inter_join_lookup = U16IdJoinLookup::new_from_primitive(right_root_ids);
 
         // determine indices of left side values to take
         let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
@@ -1579,19 +1648,45 @@ impl JoinExec for AttributesAllSelectionVecJoin {
 // and lookup. Also, if the join sides are mostly sorted by the ID columns, we'll get good page
 // CPU locality as we scan over the IDs.
 //
+// TODO - comment needs updated cause now this is supported
 // TODO - eventually this will need to support u32 IDs
-struct IdJoinLookup {
-    /// Two-level lookup: outer array indexed by top 6 bits, inner pages indexed by bottom 10 bits.
-    /// Each page maps parent_id -> row index in the right-side batch.
-    lookup: Vec<Option<Box<[Option<usize>; PAGE_SIZE]>>>,
+struct IdJoinLookup<T: IdJoinLookupType, const PAGE_SIZE: usize> {
+    pages: Vec<Option<Box<[Option<usize>; PAGE_SIZE]>>>,
+    _phantom: PhantomData<T>,
 }
 
-const PAGE_SIZE: usize = 1024;
-const PAGE_BITS: u16 = 10;
-const PAGE_MASK: u16 = 0x3FF; // Bottom 10 bits
-const NUM_PAGES: usize = 64; // 2^16 / 2^10 = 2^6 = 64
+const U16_ID_LOOKUP_PAGE_SIZE: usize = const { 1 << <u16 as IdJoinLookupType>::PAGE_BITS };
+const U32_ID_LOOKUP_PAGE_SIZE: usize = const { 1 << <u32 as IdJoinLookupType>::PAGE_BITS };
 
-impl IdJoinLookup {
+type U16IdJoinLookup = IdJoinLookup<u16, U16_ID_LOOKUP_PAGE_SIZE>;
+type U32IdJoinLookup = IdJoinLookup<u32, U32_ID_LOOKUP_PAGE_SIZE>;
+
+impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
+    // TODO comments
+    fn try_new_from_array(ids_arr: Option<&ArrayRef>, column_name: &str) -> Result<Self> {
+        let array = ids_arr.ok_or_else(|| missing_column_err(column_name))?;
+
+        if let Some(ids_as_primitive) = array.as_primitive_opt::<T::ArrowType>() {
+            Ok(Self::new_from_primitive(ids_as_primitive))
+        } else if let Some(ids_as_dict) = array.as_dictionary_opt::<UInt8Type>() {
+            if let Some(typed_dict) = ids_as_dict.downcast_dict::<PrimitiveArray<T::ArrowType>>() {
+                return Ok(Self::new_from_iter(typed_dict.into_iter()));
+            } else {
+                todo!("bad dict vals")
+            }
+        } else if let Some(ids_as_dict) = array.as_dictionary_opt::<UInt16Type>() {
+            if let Some(typed_dict) = ids_as_dict.downcast_dict::<PrimitiveArray<T::ArrowType>>() {
+                Ok(Self::new_from_iter(typed_dict.into_iter()))
+            } else {
+                todo!("bad dict vals")
+            }
+        } else {
+            todo!("bad type")
+        }
+
+        // match array.da
+    }
+
     /// Creates a new IdJoin from a UInt16Array of parent IDs.
     ///
     /// # Arguments
@@ -1599,35 +1694,40 @@ impl IdJoinLookup {
     ///
     /// # Returns
     /// A lookup structure mapping parent_id -> row index. Null values in the array are skipped.
-    fn new(ids: &UInt16Array) -> Self {
-        let mut lookup: Vec<Option<Box<[Option<usize>; PAGE_SIZE]>>> = vec![None; NUM_PAGES];
+    fn new_from_primitive(ids: &PrimitiveArray<T::ArrowType>) -> Self {
+        Self::new_from_iter::<_>(ids.iter())
+    }
 
-        // TODO bench this. There are probably some optimizations that we can make:
-        // 1 - have a loop that does no null check if there are no nulls
-        // 2 - if there are nulls, we might be able to avoid checking if each row is null by
-        //     using BitSliceIter on the null buffer to get ranges of non-null indices.
+    // TODO - commentary
+    fn new_from_iter<I: Iterator<Item = Option<<T::ArrowType as ArrowPrimitiveType>::Native>>>(
+        ids_array_iter: I,
+    ) -> Self {
+        let mut pages = Vec::new();
+        for (row_idx, value) in ids_array_iter.enumerate() {
+            let Some(value) = value else { continue };
 
-        for row_idx in 0..ids.len() {
-            // Skip null values
-            if ids.is_null(row_idx) {
-                continue;
+            let parent_id = value.as_usize();
+            let page_idx = parent_id >> T::PAGE_BITS;
+            let page_offset = parent_id & T::PAGE_MASK;
+
+            // ensure length in pages
+            if page_idx >= pages.len() {
+                pages.resize_with(page_idx + 1, || None);
             }
 
-            let parent_id = ids.value(row_idx);
-            let outer = (parent_id >> PAGE_BITS) as usize;
-            let inner = (parent_id & PAGE_MASK) as usize;
-
-            // Allocate page if needed
-            if lookup[outer].is_none() {
-                lookup[outer] = Some(Box::new([None; PAGE_SIZE]));
+            // allocate page if needed
+            if pages[page_idx].is_none() {
+                pages[page_idx] = Some(Box::new([None; PAGE_SIZE]))
             }
 
             // Store the mapping
             // safety: we've initialized lookup[outer] in the block above, so safe to expect
-            lookup[outer].as_mut().expect("allocated")[inner] = Some(row_idx);
+            pages[page_idx].as_mut().expect("allocated")[page_offset] = Some(row_idx);
         }
-
-        Self { lookup }
+        Self {
+            pages,
+            _phantom: Default::default(),
+        }
     }
 
     /// Looks up a left-side ID and returns the corresponding right-side row index.
@@ -1639,11 +1739,46 @@ impl IdJoinLookup {
     /// * `Some(row_idx)` - The row index in the right batch if a match exists
     /// * `None` - No matching parent_id found
     #[inline]
-    fn lookup(&self, left_id: u16) -> Option<usize> {
-        let outer = (left_id >> PAGE_BITS) as usize;
-        let inner = (left_id & PAGE_MASK) as usize;
+    fn lookup(&self, left_id: T) -> Option<usize> {
+        const { assert!(PAGE_SIZE == T::PAGE_SIZE) };
+        let page_idx = left_id.as_usize() >> T::PAGE_BITS;
+        let page_offset = left_id.as_usize() & T::PAGE_MASK;
 
-        self.lookup[outer].as_ref().and_then(|page| page[inner])
+        self.pages
+            .get(page_idx)
+            .and_then(|page| page.as_ref().and_then(|page| page[page_offset]))
+    }
+}
+
+// Helper trait for defining the size of various structures in the IdJoinLookup paged vec.
+trait IdJoinLookupType:
+    Copy + std::ops::Shr<Output = Self> + std::ops::BitAnd<Output = Self> + Sized
+{
+    const PAGE_BITS: usize;
+    const PAGE_SIZE: usize = 1 << Self::PAGE_BITS;
+    const PAGE_MASK: usize = Self::PAGE_SIZE - 1;
+    type ArrowType: ArrowPrimitiveType;
+
+    fn as_usize(self) -> usize;
+}
+
+impl IdJoinLookupType for u16 {
+    const PAGE_BITS: usize = 10;
+    type ArrowType = UInt16Type;
+
+    #[inline]
+    fn as_usize(self) -> usize {
+        self as usize
+    }
+}
+
+impl IdJoinLookupType for u32 {
+    const PAGE_BITS: usize = 14;
+    type ArrowType = UInt32Type;
+
+    #[inline]
+    fn as_usize(self) -> usize {
+        self as usize
     }
 }
 
@@ -1667,6 +1802,15 @@ mod test {
             scope_ids: None,
             resource_ids: None,
         }
+    }
+
+    #[test]
+    fn test_marker_fail() {
+        let g = IdJoinLookup::<u16, 1024> {
+            pages: Vec::new(),
+            _phantom: Default::default(),
+        };
+        _ = g.lookup(5);
     }
 
     #[test]
