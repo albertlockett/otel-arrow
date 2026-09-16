@@ -625,10 +625,7 @@ fn try_build_simple_join_ids<T: IdJoinLookupType, const PAGE_SIZE: usize>(
     left_ids: Option<&ArrayRef>,
     column_name: &str,
     right_lookup: &IdJoinLookup<T, PAGE_SIZE>,
-) -> Result<Int32Array>
-where
-    T: From<<<T as IdJoinLookupType>::ArrowType as ArrowPrimitiveType>::Native>,
-{
+) -> Result<Int32Array> {
     let array = left_ids.ok_or_else(|| missing_column_err(column_name))?;
 
     if let Some(ids_as_primitive) = array.as_primitive_opt::<T::ArrowType>() {
@@ -666,10 +663,7 @@ fn build_simple_join_indices_from_iter<
 >(
     left_ids: I,
     right_lookup: &IdJoinLookup<T, PAGE_SIZE>,
-) -> Int32Array
-where
-    T: From<<<T as IdJoinLookupType>::ArrowType as ArrowPrimitiveType>::Native>,
-{
+) -> Int32Array {
     let mut to_take = Int32Array::builder(left_ids.len());
     left_ids.for_each(|id| {
         if let Some(left_id) = id {
@@ -1752,7 +1746,11 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
 
 // Helper trait for defining the size of various structures in the IdJoinLookup paged vec.
 trait IdJoinLookupType:
-    Copy + std::ops::Shr<Output = Self> + std::ops::BitAnd<Output = Self> + Sized
+    Copy
+    + std::ops::Shr<Output = Self>
+    + std::ops::BitAnd<Output = Self>
+    + From<<Self::ArrowType as ArrowPrimitiveType>::Native>
+    + Sized
 {
     const PAGE_BITS: usize;
     const PAGE_SIZE: usize = 1 << Self::PAGE_BITS;
