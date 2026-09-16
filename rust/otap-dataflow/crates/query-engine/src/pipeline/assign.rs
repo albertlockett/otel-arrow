@@ -786,25 +786,25 @@ impl AssignPipelineStage {
                                 .rows_to_take(left_join_input, &eval_result, &otap_batch)?
                         }
                     }
-                    DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_) => {
-                        RootAttrsToRootJoin::new().rows_to_take(
-                            left_join_input,
-                            &eval_result,
-                            &otap_batch,
-                        )?
-                    }
-                    DataScope::Record(RecordScope::Child(_child)) => {
-                        // In the current implementation, we shouldn't end up here. The planner
-                        // should not allow us to create an expression that would evaluate on some
-                        // child record (like metric data points), and assign the result to an
-                        // attribute. Returning this error to be defensive
-                        return Err(Error::ExecutionError {
-                            cause: format!(
-                                "unexpected DataScope for attribute assignment `{:?}`",
-                                eval_result.data_scope
-                            ),
-                        });
-                    }
+                    DataScope::Record(_) | DataScope::RootParent(_) => RootAttrsToRootJoin::new()
+                        .rows_to_take(
+                        left_join_input,
+                        &eval_result,
+                        &otap_batch,
+                    )?,
+                    // TODO - remove this code block - comment is no longer true
+                    // DataScope::Record(RecordScope::Child(_child)) => {
+                    //     // In the current implementation, we shouldn't end up here. The planner
+                    //     // should not allow us to create an expression that would evaluate on some
+                    //     // child record (like metric data points), and assign the result to an
+                    //     // attribute. Returning this error to be defensive
+                    //     return Err(Error::ExecutionError {
+                    //         cause: format!(
+                    //             "unexpected DataScope for attribute assignment `{:?}`",
+                    //             eval_result.data_scope
+                    //         ),
+                    //     });
+                    // }
                     DataScope::StaticScalar => {
                         // safety: if the data scope was scalar, the result would have also been a
                         // Scalar which would have been handled above where we checked the

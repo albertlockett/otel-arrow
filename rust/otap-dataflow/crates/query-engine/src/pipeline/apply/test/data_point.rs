@@ -860,10 +860,11 @@ async fn test_assign_to_datapoint_attributes() {
     };
 
     println!("{metrics_result:#?}");
+    // TODO - assert
 }
 
 #[tokio::test]
-async fn test_assign_to_datapoint_attributes_requiring_join() {
+async fn test_assign_to_datapoint_attributes_requiring_join_attrs() {
     let query = "metrics | apply data_points {
         set attributes[\"x\"] = join(\".\", attributes[\"y\"], attributes[\"z\"])
     }";
@@ -897,10 +898,90 @@ async fn test_assign_to_datapoint_attributes_requiring_join() {
     };
 
     println!("{metrics_result:#?}");
+    // TODO - assert
+}
+
+#[tokio::test]
+async fn test_assign_to_datapoint_attributes_requiring_attrs_join_to_root_right() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = join(\".\", attributes[\"y\"], flags as String)
+    }";
+
+    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
+        .unwrap()
+        .pipeline;
+    let mut pipeline = Pipeline::new(pipeline_expr);
+
+    let metrics = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: vec![
+                    NumberDataPoint::build()
+                        .flags(5u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("a")),
+                            KeyValue::new("y", AnyValue::new_string("b")),
+                            KeyValue::new("z", AnyValue::new_string("c")),
+                        ])
+                        .finish(),
+                ],
+            })
+            .finish(),
+    ];
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
+    let result = pipeline.execute(input_batch).await.unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
+        panic!("invalid signal type")
+    };
+
+    println!("{metrics_result:#?}");
+    // TODO - assert
+}
+
+#[tokio::test]
+async fn test_assign_to_datapoint_attributes_requiring_attrs_join_to_root_left() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = join(\".\", flags as String, attributes[\"y\"])
+    }";
+
+    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
+        .unwrap()
+        .pipeline;
+    let mut pipeline = Pipeline::new(pipeline_expr);
+
+    let metrics = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: vec![
+                    NumberDataPoint::build()
+                        .flags(5u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("a")),
+                            KeyValue::new("y", AnyValue::new_string("b")),
+                            KeyValue::new("z", AnyValue::new_string("c")),
+                        ])
+                        .finish(),
+                ],
+            })
+            .finish(),
+    ];
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
+    let result = pipeline.execute(input_batch).await.unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
+        panic!("invalid signal type")
+    };
+
+    println!("{metrics_result:#?}");
+    // TODO - assert
 }
 
 // Assign test cases to add:
 // - assign fields
+// - TODO same joins as above, but only 2 way ...
 // - assign when no existing attributes
 // - assign from func call w/ joins, etc?
 

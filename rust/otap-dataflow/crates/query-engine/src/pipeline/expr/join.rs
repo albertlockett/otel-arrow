@@ -187,6 +187,8 @@ pub fn join<'a>(
             }
         }
         (
+            // TODO - similar to the case below, I think we can relax the RecordScope::Signal constaint here
+            // but we need tests
             DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
             DataScope::Attribute(attr_id, _),
         ) => {
@@ -196,6 +198,8 @@ pub fn join<'a>(
         }
         (
             DataScope::Attribute(attr_id, _),
+            // TODO - I think this can just be DataScope::Record(_) but we'll need to
+            // have a test that exercises the 2 way join here
             DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
         ) => match attr_id {
             AttributesIdentifier::Record(_) => {
@@ -316,10 +320,7 @@ fn compute_join_alignment(
                 ))
             }
         }
-        (
-            DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
-            DataScope::Attribute(attr_id, _),
-        ) => {
+        (DataScope::Record(_) | DataScope::RootParent(_), DataScope::Attribute(attr_id, _)) => {
             let exec = RootToAttributesJoin::new(*attr_id);
             let indices = exec.rows_to_take(left, right, otap_batch)?;
             Ok((
@@ -327,27 +328,26 @@ fn compute_join_alignment(
                 left.data_scope.clone(),
             ))
         }
-        (
-            DataScope::Attribute(attr_id, _),
-            DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
-        ) => match attr_id {
-            AttributesIdentifier::Record(_) => {
-                let exec = RootAttrsToRootJoin::new();
-                let indices = exec.rows_to_take(left, right, otap_batch)?;
-                Ok((
-                    JoinAlignment::LeftPreserved(indices),
-                    left.data_scope.clone(),
-                ))
+        (DataScope::Attribute(attr_id, _), DataScope::Record(_) | DataScope::RootParent(_)) => {
+            match attr_id {
+                AttributesIdentifier::Record(_) => {
+                    let exec = RootAttrsToRootJoin::new();
+                    let indices = exec.rows_to_take(left, right, otap_batch)?;
+                    Ok((
+                        JoinAlignment::LeftPreserved(indices),
+                        left.data_scope.clone(),
+                    ))
+                }
+                AttributesIdentifier::NonRecord(payload_type) => {
+                    let exec = NonRootAttrsToRootReverseJoin::new(*payload_type);
+                    let indices = exec.rows_to_take(left, right, otap_batch)?;
+                    Ok((
+                        JoinAlignment::RightPreserved(indices),
+                        right.data_scope.clone(),
+                    ))
+                }
             }
-            AttributesIdentifier::NonRecord(payload_type) => {
-                let exec = NonRootAttrsToRootReverseJoin::new(*payload_type);
-                let indices = exec.rows_to_take(left, right, otap_batch)?;
-                Ok((
-                    JoinAlignment::RightPreserved(indices),
-                    right.data_scope.clone(),
-                ))
-            }
-        },
+        }
         (left, right) => Err(Error::ExecutionError {
             cause: format!("invalid data scopes for join: left {left:?} right {right:?}"),
         }),
@@ -978,28 +978,38 @@ impl JoinExec for RootToAttributesJoin {
         right: &JoinInput,
         _otap_batch: &OtapArrowRecords,
     ) -> Result<Int32Array> {
-        // build the lookup for the right side of the join by parent ID
-        let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
-        let right_lookup = U16IdJoinLookup::new_from_primitive(right_parent_ids);
+        let is_u32_ids = matches!(
+            left.data_scope.as_ref(),
+            DataScope::Record(RecordScope::Child(_))
+        );
+        if is_u32_ids {
+            let right_lookup =
+                U32IdJoinLookup::try_new_from_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
+            try_build_simple_join_ids(left.ids.as_ref(), consts::ID, &right_lookup)
+        } else {
+            // build the lookup for the right side of the join by parent ID
+            let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
+            let right_lookup = U16IdJoinLookup::new_from_primitive(right_parent_ids);
 
-        // get the ID column for which we should scan for join
-        let left_id_col = match self.attrs_id {
-            AttributesIdentifier::Record(_) => &left.ids,
-            AttributesIdentifier::NonRecord(payload_type) => match payload_type {
-                ArrowPayloadType::ResourceAttrs => &left.resource_ids,
-                ArrowPayloadType::ScopeAttrs => &left.scope_ids,
-                other => {
-                    return Err(Error::ExecutionError {
-                        cause: format!(
-                            "RootToAttributesJoin received invalid attrs payload type {other:?}"
-                        ),
-                    });
-                }
-            },
-        };
-        let left_parent_ids = extract_u16_array(left_id_col.as_ref(), consts::ID)?;
+            // get the ID column for which we should scan for join
+            let left_id_col = match self.attrs_id {
+                AttributesIdentifier::Record(_) => &left.ids,
+                AttributesIdentifier::NonRecord(payload_type) => match payload_type {
+                    ArrowPayloadType::ResourceAttrs => &left.resource_ids,
+                    ArrowPayloadType::ScopeAttrs => &left.scope_ids,
+                    other => {
+                        return Err(Error::ExecutionError {
+                            cause: format!(
+                                "RootToAttributesJoin received invalid attrs payload type {other:?}"
+                            ),
+                        });
+                    }
+                },
+            };
+            let left_parent_ids = extract_u16_array(left_id_col.as_ref(), consts::ID)?;
 
-        Ok(build_simple_join_indices(left_parent_ids, &right_lookup))
+            Ok(build_simple_join_indices(left_parent_ids, &right_lookup))
+        }
     }
 
     fn join(
@@ -1034,15 +1044,28 @@ impl JoinExec for RootAttrsToRootJoin {
         right: &JoinInput,
         _otap_batch: &OtapArrowRecords,
     ) -> Result<Int32Array> {
-        // build the lookup for the right side of the join by ID column
-        let right_ids = extract_u16_array(right.ids.as_ref(), consts::ID)?;
-        let right_lookup = U16IdJoinLookup::new_from_primitive(right_ids);
+        // TODO commentary on how we know it's u32 ids b/c of this
+        let is_u32_ids = matches!(
+            left.data_scope.as_ref(),
+            DataScope::Attribute(AttributesIdentifier::Record(RecordScope::Child(_)), _)
+        );
+        // TODO - the u16 path should proceed the same way as the u32 path
+        if is_u32_ids {
+            // TODO - it's a bit messy to have to call UInt32Type for this considering the ID lookup type is already U32
+            let right_lookup =
+                U32IdJoinLookup::try_new_from_array(right.ids.as_ref(), consts::PARENT_ID)?;
+            try_build_simple_join_ids(left.parent_ids.as_ref(), consts::PARENT_ID, &right_lookup)
+        } else {
+            // build the lookup for the right side of the join by ID column
+            let right_ids = extract_u16_array(right.ids.as_ref(), consts::ID)?;
+            let right_lookup = U16IdJoinLookup::new_from_primitive(right_ids);
 
-        // scan the parent_ID column from the attributes to determine which rows from the
-        // right values should be taken
-        let left_parent_ids = extract_u16_array(left.parent_ids.as_ref(), consts::PARENT_ID)?;
+            // scan the parent_ID column from the attributes to determine which rows from the
+            // right values should be taken
+            let left_parent_ids = extract_u16_array(left.parent_ids.as_ref(), consts::PARENT_ID)?;
 
-        Ok(build_simple_join_indices(left_parent_ids, &right_lookup))
+            Ok(build_simple_join_indices(left_parent_ids, &right_lookup))
+        }
     }
 
     fn join(
