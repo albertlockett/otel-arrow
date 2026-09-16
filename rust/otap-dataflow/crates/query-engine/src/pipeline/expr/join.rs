@@ -1734,6 +1734,7 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
     /// * `None` - No matching parent_id found
     #[inline]
     fn lookup(&self, left_id: T) -> Option<usize> {
+        // TODO - comment on why this is here.
         const { assert!(PAGE_SIZE == T::PAGE_SIZE) };
         let page_idx = left_id.as_usize() >> T::PAGE_BITS;
         let page_offset = left_id.as_usize() & T::PAGE_MASK;
