@@ -155,6 +155,7 @@ impl ScopedExpr {
                     },
                 ..
             } => {
+                // TODO pretty sure this can just be deleted
                 // // TODO - do we need some tests for this stuff?
                 // let Some(projected_batch) = projection.project_with_options(record_batch, projection_opts)? else {
                 //     return Ok(ColumnarValue::Scalar(if *missing_data_passes {

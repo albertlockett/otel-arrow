@@ -935,12 +935,105 @@ async fn test_filter_data_point_by_attribute_and() {
 
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_or() {
-    todo!()
+    let query = "metrics | apply data_points {
+        where attributes[\"x\"] == 5 or attributes[\"y\"] == 6
+    }";
+
+    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
+        .unwrap()
+        .pipeline;
+    let mut pipeline = Pipeline::new(pipeline_expr);
+
+    let metrics = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: vec![
+                    NumberDataPoint::build()
+                        .flags(1u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("x", AnyValue::new_int(5)),
+                            KeyValue::new("y", AnyValue::new_int(6)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build()
+                        .flags(2u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("x", AnyValue::new_int(6)),
+                            KeyValue::new("y", AnyValue::new_int(6)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build()
+                        .flags(3u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("y", AnyValue::new_int(6)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build().flags(4u32).finish(),
+                ],
+            })
+            .finish(),
+    ];
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
+    let result = pipeline.execute(input_batch).await.unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
+        panic!("invalid signal type")
+    };
+
+    println!("{metrics_result:#?}");
 }
 
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_logical_binary_inverted() {
-    todo!()
+    let query = "metrics | apply data_points {
+        where not(attributes[\"x\"] == 5)
+    }";
+
+    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
+        .unwrap()
+        .pipeline;
+    let mut pipeline = Pipeline::new(pipeline_expr);
+
+    let metrics = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: vec![
+                    NumberDataPoint::build()
+                        .flags(1u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("x", AnyValue::new_int(5)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build()
+                        .flags(2u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("x", AnyValue::new_int(6)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build()
+                        .flags(3u32)
+                        .attributes(vec![KeyValue::new("a", AnyValue::new_string("b"))])
+                        .finish(),
+                    NumberDataPoint::build().flags(4u32).finish(),
+                ],
+            })
+            .finish(),
+    ];
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
+    let result = pipeline.execute(input_batch).await.unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
+        panic!("invalid signal type")
+    };
+
+    println!("{metrics_result:#?}");
 }
 
 #[tokio::test]
