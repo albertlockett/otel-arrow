@@ -213,18 +213,12 @@ pub fn join<'a>(
                 Ok((join_result, right.data_scope.clone()))
             }
         },
-        (
-            DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
-            DataScope::AttributesAll(_),
-        ) => {
+        (DataScope::Record(_) | DataScope::RootParent(_), DataScope::AttributesAll(_)) => {
             let join_exec = AttributesAllSelectionVecJoin::new(false);
             let join_result = join_exec.join(left, right, otap_batch)?;
             Ok((join_result, left.data_scope.clone()))
         }
-        (
-            DataScope::AttributesAll(_),
-            DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
-        ) => {
+        (DataScope::AttributesAll(_), DataScope::Record(_) | DataScope::RootParent(_)) => {
             let join_exec = AttributesAllSelectionVecJoin::new(true);
             let join_result = join_exec.join(left, right, otap_batch)?;
             Ok((join_result, right.data_scope.clone()))
@@ -1500,15 +1494,12 @@ impl AttributesAllSelectionVecJoin {
         Self { all_attrs_left }
     }
 
-    fn extract_probe_ids(
-        input: &JoinInput,
-        attrs_id: AttributesIdentifier,
-    ) -> Result<&UInt16Array> {
+    fn extract_probe_ids(input: &JoinInput, attrs_id: AttributesIdentifier) -> Result<&ArrayRef> {
         if matches!(
             input.data_scope.as_ref(),
-            DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_)
+            DataScope::Record(_) | DataScope::RootParent(_)
         ) {
-            let ids = match attrs_id {
+            match attrs_id {
                 AttributesIdentifier::Record(_) => input.ids.as_ref(),
                 AttributesIdentifier::NonRecord(payload) => match payload {
                     ArrowPayloadType::ResourceAttrs => input.resource_ids.as_ref(),
@@ -1519,8 +1510,8 @@ impl AttributesAllSelectionVecJoin {
                         });
                     }
                 },
-            };
-            extract_u16_array(ids, consts::ID)
+            }
+            .ok_or_else(|| missing_column_err(consts::ID))
         } else {
             // not yet supported
             Err(Error::NotYetSupportedError {
@@ -1567,15 +1558,19 @@ impl JoinExec for AttributesAllSelectionVecJoin {
             });
         }
 
-        let parent_ids = extract_u16_array(
-            if self.all_attrs_left {
-                left.parent_ids.as_ref()
-            } else {
-                right.parent_ids.as_ref()
-            },
-            consts::PARENT_ID,
-        )?;
+        // filter for only the selected parent Ids
+        let parent_ids = if self.all_attrs_left {
+            left.parent_ids.as_ref()
+        } else {
+            right.parent_ids.as_ref()
+        }
+        .ok_or_else(|| missing_column_err(consts::PARENT_ID))?;
 
+        // TODO this could be optimized -- if we receive a boolean, we don't need to allocate
+        // a full new boolean buffer here. Although - how would we end up in this situation?
+        // Maybe through short circuiting or something? idk - try to figure this out
+        // Once that's done, it would also let us move the parent_ids variable definition closer
+        // to where it's used
         let selection_vec = match vals {
             ColumnarValue::Array(arr) => arr.as_boolean().clone(),
             ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))) => {
@@ -1596,13 +1591,7 @@ impl JoinExec for AttributesAllSelectionVecJoin {
 
         let selected_parent_ids = filter(parent_ids, &selection_vec)?;
         let mut selected_lookup = IdBitmap::new();
-        selected_lookup.populate(
-            selected_parent_ids
-                .as_primitive::<UInt16Type>()
-                .values()
-                .iter()
-                .map(|i| *i as u32),
-        );
+        selected_lookup.try_populate_from_id_column(&selected_parent_ids)?;
 
         let attrs_side_scope = if self.all_attrs_left { left } else { right }
             .data_scope
@@ -1620,10 +1609,26 @@ impl JoinExec for AttributesAllSelectionVecJoin {
             if self.all_attrs_left { right } else { left },
             *attrs_side_id,
         )?;
-        let bool_buf = MutableBuffer::collect_bool(id_col.len(), |index| {
-            let parent_id = id_col.values()[index];
-            selected_lookup.contains(parent_id as u32)
-        });
+        let bool_buf = match id_col.data_type() {
+            DataType::UInt16 => {
+                let id_col = id_col.as_primitive::<UInt16Type>();
+                MutableBuffer::collect_bool(id_col.len(), |index| {
+                    let parent_id = id_col.values()[index];
+                    selected_lookup.contains(parent_id as u32)
+                })
+            }
+            DataType::UInt32 => {
+                let id_col = id_col.as_primitive::<UInt32Type>();
+                MutableBuffer::collect_bool(id_col.len(), |index| {
+                    let parent_id = id_col.values()[index];
+                    selected_lookup.contains(parent_id)
+                })
+            }
+            _ => {
+                todo!("invalid ID column type")
+            }
+        };
+
         let aligned_selection_vec =
             BooleanArray::new(BooleanBuffer::new(bool_buf.into(), 0, id_col.len()), None);
 

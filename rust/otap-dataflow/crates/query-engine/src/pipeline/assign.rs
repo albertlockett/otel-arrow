@@ -21,7 +21,7 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, DictionaryArray, Float64Array,
     Int64Array, NullArray, PrimitiveArray, RecordBatch, StringArray, StructArray, UInt8Array,
-    UInt16Array, UInt32Array,
+    UInt16Array,
 };
 use arrow::buffer::{BooleanBuffer, ScalarBuffer};
 use arrow::compute::kernels::cmp::{eq, neq};

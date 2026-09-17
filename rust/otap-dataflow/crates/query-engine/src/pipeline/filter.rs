@@ -1,11 +1,12 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::pipeline::PipelineStage;
-use crate::pipeline::expr::eval::EvalContext;
+use crate::pipeline::expr::eval::{EvalContext, align_value_to_record};
 use crate::pipeline::expr::types::MetricDataPointType;
 use crate::pipeline::expr::{ChildRecordKind, RecordScope};
 use crate::pipeline::expr::{DataScope, ScopedExpr, ScopedValue, eval::resolve_attrs_payload_type};
@@ -185,7 +186,7 @@ impl FilterPipelineStage {
             DataScope::Record(RecordScope::Child(ChildRecordKind::DataPoint)),
         );
 
-        match predicate_eval_value.values {
+        match &predicate_eval_value.values {
             ColumnarValue::Scalar(scalar) => {
                 match scalar {
                     ScalarValue::Boolean(Some(true)) => {
@@ -209,20 +210,38 @@ impl FilterPipelineStage {
                 // get a selection vector (boolean array of rows passing predicate) that is aligned
                 // with the row order of the data point record batch
                 let arr_aligned = if is_aligned {
-                    arr
+                    Cow::Borrowed(arr)
                 } else {
-                    // the normal course of action here would be to align this to the row order of
-                    // the data point batch via a join, but currently we don't support this. the
-                    // planner actually should have returned an Error::NotYetSupported for exprs
-                    // that would end up here, so this error is just here for being defensive.
-                    return Err(Error::ExecutionError {
-                        cause: "misaligned expression predicate result when filtering data points"
-                            .into(),
-                    });
+                    let Some(metrics_dp_record_batch) =
+                        otap_batch.get(metric_data_point_type.payload_type())
+                    else {
+                        // nothing to filter -- weird
+                        return Ok(());
+                    };
+                    let aligned_scoped_value = align_value_to_record(
+                        predicate_eval_value,
+                        RecordScope::Child(ChildRecordKind::DataPoint),
+                        metrics_dp_record_batch,
+                        otap_batch,
+                    )?;
+                    match aligned_scoped_value.values {
+                        ColumnarValue::Array(arr) => Cow::Owned(arr),
+                        ColumnarValue::Scalar(s) => {
+                            todo!("refactor this so we align before checking scalar vs arr")
+                        }
+                    }
+                    // // the normal course of action here would be to align this to the row order of
+                    // // the data point batch via a join, but currently we don't support this. the
+                    // // planner actually should have returned an Error::NotYetSupported for exprs
+                    // // that would end up here, so this error is just here for being defensive.
+                    // return Err(Error::ExecutionError {
+                    //     cause: "misaligned expression predicate result when filtering data points"
+                    //         .into(),
+                    // });
                 };
 
                 let selection_vec =
-                    as_boolean_array(&arr_aligned).map_err(|_| Error::ExecutionError {
+                    as_boolean_array(arr_aligned.as_ref()).map_err(|_| Error::ExecutionError {
                         cause: format!(
                             "expected boolean array for filter selection, found {}",
                             arr_aligned.data_type()
@@ -347,7 +366,7 @@ fn align_selection_vec_from_attrs(
     value: ScopedValue,
     attrs_id: &AttributesIdentifier,
     otap_batch: &OtapArrowRecords,
-    eval_context: &EvalContext,
+    eval_context: &EvalContext<'_>,
 ) -> Result<ScopedValue> {
     let root_rb = otap_batch
         .root_record_batch()

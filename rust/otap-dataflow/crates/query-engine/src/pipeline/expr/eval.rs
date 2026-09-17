@@ -1019,11 +1019,54 @@ pub(crate) fn align_value_to_root(
         Some(rb) => rb,
         None => return Ok(value),
     };
+    align_value_to_record(value, RecordScope::Signal, root_batch, otap_batch)
 
+    // let left_input = JoinInput::new(
+    //     ColumnarValue::Array(Arc::new(NullArray::new(root_batch.num_rows()))),
+    //     Rc::new(DataScope::Record(RecordScope::Signal)),
+    //     root_batch,
+    // );
+
+    // let right_input = scoped_value_to_join_input(value, otap_batch)?;
+
+    // let (result_rb, result_scope) = join(&left_input, &right_input, otap_batch)?;
+    // let result_col_name = arg_column_name(1);
+    // let col = result_rb
+    //     .column_by_name(&result_col_name)
+    //     .ok_or_else(|| Error::ExecutionError {
+    //         // shouldn't happen - we expect the join to always produce the column with the
+    //         // correct name, but returning the error here is just being defensive
+    //         cause: format!("unexpected join result - expected column {result_col_name}"),
+    //     })?
+    //     .clone();
+
+    // debug_assert!(matches!(
+    //     result_scope.as_ref(),
+    //     DataScope::Record(RecordScope::Signal)
+    // ));
+
+    // Ok(ScopedValue::new(
+    //     ColumnarValue::Array(col),
+    //     result_scope.as_ref().clone(),
+    //     root_batch,
+    // ))
+}
+
+// TODO comment on what this is doing
+// TODO - reuse this in assign.rs
+// TODO - reuse this in filter.rs for filtering root batch
+pub(crate) fn align_value_to_record(
+    value: ScopedValue,
+    record_scope: RecordScope,
+    record_rb: &RecordBatch,
+    otap_batch: &OtapArrowRecords,
+) -> Result<ScopedValue> {
     let left_input = JoinInput::new(
-        ColumnarValue::Array(Arc::new(NullArray::new(root_batch.num_rows()))),
-        Rc::new(DataScope::Record(RecordScope::Signal)),
-        root_batch,
+        // TODO - fix all the tests, change this to ScalarNull, and if it passes
+        // keep this as a scalar to avoid the heap allocation for the Arc
+        ColumnarValue::Array(Arc::new(NullArray::new(record_rb.num_rows()))),
+        Rc::new(DataScope::Record(record_scope)),
+        record_rb,
     );
 
     let right_input = scoped_value_to_join_input(value, otap_batch)?;
@@ -1041,12 +1084,12 @@ pub(crate) fn align_value_to_root(
 
     debug_assert!(matches!(
         result_scope.as_ref(),
-        DataScope::Record(RecordScope::Signal)
+        DataScope::Record(result_record_scope) if record_scope == *result_record_scope
     ));
 
     Ok(ScopedValue::new(
         ColumnarValue::Array(col),
         result_scope.as_ref().clone(),
-        root_batch,
+        record_rb,
     ))
 }
