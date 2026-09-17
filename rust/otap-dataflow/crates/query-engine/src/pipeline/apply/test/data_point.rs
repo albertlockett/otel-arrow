@@ -881,7 +881,56 @@ async fn test_filter_data_point_by_attribute_value() {
 
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_and() {
-    todo!()
+    let query = "metrics | apply data_points {
+        where attributes[\"x\"] == 5 and attributes[\"y\"] == 6
+    }";
+
+    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
+        .unwrap()
+        .pipeline;
+    let mut pipeline = Pipeline::new(pipeline_expr);
+
+    let metrics = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: vec![
+                    NumberDataPoint::build()
+                        .flags(1u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("x", AnyValue::new_int(5)),
+                            KeyValue::new("y", AnyValue::new_int(6)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build()
+                        .flags(2u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("x", AnyValue::new_int(6)),
+                            KeyValue::new("y", AnyValue::new_int(6)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build()
+                        .flags(3u32)
+                        .attributes(vec![
+                            KeyValue::new("a", AnyValue::new_string("b")),
+                            KeyValue::new("y", AnyValue::new_int(6)),
+                        ])
+                        .finish(),
+                    NumberDataPoint::build().flags(4u32).finish(),
+                ],
+            })
+            .finish(),
+    ];
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
+    let result = pipeline.execute(input_batch).await.unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
+        panic!("invalid signal type")
+    };
+
+    println!("{metrics_result:#?}");
 }
 
 #[tokio::test]
@@ -1049,6 +1098,8 @@ async fn test_assign_to_datapoint_attributes_requiring_attrs_join_to_root_left()
 // - TODO same joins as above, but only 2 way (arithmetic?) ...
 // - assign when no existing attributes
 // - assign from func call w/ joins, etc?
+// - assign from value of a different attribute (e.g. simply set attribute["x"] = attribute["y"])
+//   which I think will mean the rvalue scope is AttributesAll?
 
 /// Scenario: try to execute some queries that have valid syntax, but define operations that are
 /// not supported by this query engine (although most will be supported in future)

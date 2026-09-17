@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, AsArray, BooleanArray, BooleanBufferBuilder, NullArray, RecordBatch,
-    StringArray, StructArray, UInt16Array,
+    StringArray, StructArray, UInt16Array, UInt32Array,
 };
 use arrow::buffer::BooleanBuffer;
 use arrow::compute::filter_record_batch;
 use arrow::compute::kernels::cmp::eq;
-use arrow::datatypes::{Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, UInt8Type, UInt16Type, UInt32Type};
 use datafusion::common::DFSchema;
 use datafusion::logical_expr::{ColumnarValue, Expr};
 use datafusion::physical_expr::{PhysicalExprRef, create_physical_expr};
@@ -100,6 +100,7 @@ impl ScopedExpr {
         otap_batch: &OtapArrowRecords,
         eval_ctx: &EvalContext<'_>,
     ) -> Result<Option<ScopedValue>> {
+        println!("eval as value {self:?}");
         match self {
             Self::Eval { scope, eval } => {
                 eval_datafusion_expr_value(scope, eval, otap_batch, eval_ctx)
@@ -539,13 +540,15 @@ fn execute_bitmap_and_as_value(
 
     // short-circuit: if left is all-false, skip right
     if left_result.mask == IdMask::None {
-        return materialize_id_mask_to_value(IdMask::None, None, otap_batch);
+        return materialize_id_mask_to_value(IdMask::None, None, otap_batch, eval_ctx);
     }
 
     let right_result = right.execute_as_id_mask(otap_batch, eval_ctx, &mut pool)?;
+    println!("here=\nleft:{left_result:?}\nright:{right_result:?}");
+
     let combined_scope = combine_scope(left_result.scope, right_result.scope);
     let combined = left_result.mask.combine_and(right_result.mask, &mut pool);
-    materialize_id_mask_to_value(combined, combined_scope, otap_batch)
+    materialize_id_mask_to_value(combined, combined_scope, otap_batch, eval_ctx)
 }
 
 /// Execute a `BitmapOr` node as a value.
@@ -563,13 +566,13 @@ fn execute_bitmap_or_as_value(
     // short-circuit: if left is all-true, skip right
     // TODO - should we also be checking if it's weirdly IdMask::Some(x) where x.false() == 0 ? or w/e? (same for NotSome)
     if left_result.mask == IdMask::All {
-        return materialize_id_mask_to_value(IdMask::All, None, otap_batch);
+        return materialize_id_mask_to_value(IdMask::All, None, otap_batch, eval_ctx);
     }
 
     let right_result = right.execute_as_id_mask(otap_batch, eval_ctx, &mut pool)?;
     let combined_scope = combine_scope(left_result.scope, right_result.scope);
     let combined = left_result.mask.combine_or(right_result.mask, &mut pool);
-    materialize_id_mask_to_value(combined, combined_scope, otap_batch)
+    materialize_id_mask_to_value(combined, combined_scope, otap_batch, eval_ctx)
 }
 
 /// Execute a `BitmapNot` node as a value.
@@ -581,7 +584,7 @@ fn execute_bitmap_not_as_value(
     let mut pool = IdBitmapPool::new();
     let child_result = child.execute_as_id_mask(otap_batch, eval_ctx, &mut pool)?;
     let inverted = invert_id_mask(child_result.mask);
-    materialize_id_mask_to_value(inverted, child_result.scope, otap_batch)
+    materialize_id_mask_to_value(inverted, child_result.scope, otap_batch, eval_ctx)
 }
 
 /// Evaluate a DataFusion expression on a RecordBatch.
@@ -718,12 +721,217 @@ pub(super) fn invert_id_mask(mask: IdMask) -> IdMask {
     }
 }
 
+// TODO fix this comment cause its no longer correct
 /// Materialize an `IdMask` to a root-aligned `BooleanArray` wrapped in a `ScopedValue`.
 ///
 /// The `mask_scope`, if passed, parameter will be used to determine which ID column
 /// (`id`, `scope.id` or `resource.id`) will be checked for membership in the `mask`.
 /// When `mask_scope` is `None`, the `id` column will be used by default.
 fn materialize_id_mask_to_value(
+    mask: IdMask,
+    mask_scope: Option<DataScope>,
+    otap_batch: &OtapArrowRecords,
+    eval_ctx: &EvalContext<'_>,
+) -> Result<Option<ScopedValue>> {
+    let scalar_val = match mask {
+        IdMask::All => Some(true),
+        IdMask::None => Some(false),
+        _ => None,
+    };
+
+    if let Some(scalar_val) = scalar_val {
+        return Ok(Some(ScopedValue::new_scalar(ScalarValue::Boolean(Some(
+            scalar_val,
+        )))));
+    }
+
+    let root_rb = match otap_batch.root_record_batch() {
+        Some(rb) => rb,
+        None => return Ok(None),
+    };
+
+    let (id_col, result_record_scope) = match mask_scope {
+        None => {
+            todo!("invalid mask - sholdn't be None for IdMask variant")
+        }
+        Some(DataScope::StaticScalar) => {
+            todo!("return scalar here")
+        }
+        Some(DataScope::Attribute(attrs_id, _)) | Some(DataScope::AttributesAll(attrs_id)) => {
+            match attrs_id {
+                AttributesIdentifier::Record(RecordScope::Signal) => {
+                    (root_rb.column_by_name(consts::ID), RecordScope::Signal)
+                }
+                AttributesIdentifier::Record(RecordScope::Child(ChildRecordKind::DataPoint)) => {
+                    // TODO - no unwrap
+                    let metric_dp_type = eval_ctx.data_point_type.as_ref().unwrap();
+                    let Some(metric_dp_batch) = otap_batch.get(metric_dp_type.payload_type())
+                    else {
+                        return Ok(None);
+                    };
+
+                    (
+                        metric_dp_batch.column_by_name(consts::ID),
+                        RecordScope::Child(ChildRecordKind::DataPoint),
+                    )
+                }
+                AttributesIdentifier::NonRecord(payload_type) => (
+                    match payload_type {
+                        ArrowPayloadType::ResourceAttrs => {
+                            get_optional_array_from_struct_array_from_record_batch(
+                                root_rb,
+                                consts::RESOURCE,
+                                consts::ID,
+                            )?
+                        }
+                        ArrowPayloadType::ScopeAttrs => {
+                            get_optional_array_from_struct_array_from_record_batch(
+                                root_rb,
+                                consts::SCOPE,
+                                consts::ID,
+                            )?
+                        }
+                        other => {
+                            return Err(Error::ExecutionError {
+                                cause: format!("invalid payload type from IdMask scope: {other:?}"),
+                            });
+                        }
+                    },
+                    RecordScope::Signal,
+                ),
+            }
+        }
+        Some(DataScope::Record(RecordScope::Signal)) | Some(DataScope::RootParent(_)) => {
+            (root_rb.column_by_name(consts::ID), RecordScope::Signal)
+        }
+        Some(DataScope::Record(RecordScope::Child(ChildRecordKind::DataPoint))) => {
+            // TODO - no unwrap
+            let metric_dp_type = eval_ctx.data_point_type.as_ref().unwrap();
+            let Some(metric_dp_batch) = otap_batch.get(metric_dp_type.payload_type()) else {
+                return Ok(None);
+            };
+
+            (
+                metric_dp_batch.column_by_name(consts::ID),
+                RecordScope::Child(ChildRecordKind::DataPoint),
+            )
+        }
+    };
+
+    let selection_vec = match id_col {
+        Some(id_col) => selection_vec_for_ids(id_col, &mask)?,
+        None => {
+            // This shouldn't happen, unless we somehow got an invalid batch. Basically it
+            // means we did some filtering on a child batch that was present, but there is
+            // no ID column to join with it
+            return Err(Error::InvalidPipelineError {
+                cause:
+                    "materialize_id_mask_to_value expected id column for materializing id bitmap"
+                        .into(),
+                query_location: None,
+            });
+        }
+    };
+
+    let result_rb = match result_record_scope {
+        RecordScope::Signal => root_rb,
+        RecordScope::Child(ChildRecordKind::DataPoint) => {
+            // TODO - this code repeated in three places ...
+            let metric_dp_type = eval_ctx.data_point_type.as_ref().unwrap();
+            let Some(metric_dp_batch) = otap_batch.get(metric_dp_type.payload_type()) else {
+                return Ok(None);
+            };
+            metric_dp_batch
+        }
+    };
+
+    Ok(Some(ScopedValue::new(
+        ColumnarValue::Array(Arc::new(selection_vec)),
+        DataScope::Record(result_record_scope),
+        result_rb,
+    )))
+}
+
+fn selection_vec_for_ids(id_col: &ArrayRef, selected_ids: &IdMask) -> Result<BooleanArray> {
+    match id_col.data_type() {
+        DataType::UInt16 => {
+            let id_col = id_col.as_primitive::<UInt16Type>();
+            Ok(selection_vec_vec_from_id_iter(
+                id_col.iter().map(|i| i.map(|i| i as u32)),
+                selected_ids,
+            ))
+        }
+        DataType::UInt32 => {
+            let id_col = id_col.as_primitive::<UInt32Type>();
+            Ok(selection_vec_vec_from_id_iter(id_col.iter(), selected_ids))
+        }
+        DataType::Dictionary(k, _) => match k.as_ref() {
+            DataType::UInt8 => {
+                let dict_arr = id_col.as_dictionary::<UInt8Type>();
+                let Some(typed_dict) = dict_arr.downcast_dict::<UInt32Array>() else {
+                    todo!()
+                };
+                Ok(selection_vec_vec_from_id_iter(
+                    typed_dict.into_iter(),
+                    selected_ids,
+                ))
+            }
+            DataType::UInt8 => {
+                let dict_arr = id_col.as_dictionary::<UInt16Type>();
+                let Some(typed_dict) = dict_arr.downcast_dict::<UInt32Array>() else {
+                    todo!()
+                };
+                Ok(selection_vec_vec_from_id_iter(
+                    typed_dict.into_iter(),
+                    selected_ids,
+                ))
+            }
+            _ => {
+                todo!()
+            }
+        },
+        _ => {
+            todo!()
+        }
+    }
+}
+
+fn selection_vec_vec_from_id_iter<I: ExactSizeIterator<Item = Option<u32>>>(
+    id_iter: I,
+    selected_ids: &IdMask,
+) -> BooleanArray {
+    // For NotSome masks, a null ID means "no attributes exist for this row",
+    // which means the row is NOT in the bitmap -- so it passes.
+    // For Some masks, null ID means no match.
+    let null_id_passes = matches!(selected_ids, IdMask::NotSome(_));
+
+    let mut builder = BooleanBufferBuilder::new(id_iter.len());
+    let mut segment_val = false;
+    let mut segment_len = 0usize;
+
+    for id in id_iter {
+        let row_val = match id {
+            Some(id) => selected_ids.contains(id),
+            None => null_id_passes,
+        };
+
+        if segment_val != row_val {
+            if segment_len > 0 {
+                builder.append_n(segment_len, segment_val);
+            }
+            segment_val = row_val;
+            segment_len = 0;
+        }
+        segment_len += 1;
+    }
+    if segment_len > 0 {
+        builder.append_n(segment_len, segment_val);
+    }
+
+    BooleanArray::new(builder.finish(), None)
+}
+
+fn materialize_id_mask_to_value_old(
     mask: IdMask,
     mask_scope: Option<DataScope>,
     otap_batch: &OtapArrowRecords,
@@ -912,7 +1120,7 @@ fn build_case_insensitive_mask(key_col: &dyn Array, key_lower: &str) -> Result<B
         DataType::Dictionary(_, value_type) if matches!(value_type.as_ref(), DataType::Utf8) => {
             let dict_arr = key_col
                 .as_any()
-                .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::UInt8Type>>()
+                .downcast_ref::<arrow::array::DictionaryArray<UInt8Type>>()
                 .ok_or_else(|| Error::ExecutionError {
                     cause: format!(
                         "expected Dict<UInt8, Utf8> for attribute key column, found {:?}",
