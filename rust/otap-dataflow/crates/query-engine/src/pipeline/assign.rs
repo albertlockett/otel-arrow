@@ -713,6 +713,8 @@ impl AssignPipelineStage {
                 unreachable!("invalid column accessor variant")
             };
 
+            println!("eval_results = {eval_result:?}");
+
             // if the evaluation of the expression turned out to be null, we'll create
             // empty attributes from the Null scalar value.
             let mut scoped_value = eval_result
@@ -734,11 +736,15 @@ impl AssignPipelineStage {
             let existing_key_mask = eq(&key_column, &StringArray::new_scalar(attrs_key))?;
             let update_parent_ids = filter(&parent_ids_col, &existing_key_mask)?;
 
+            println!("parent_id_set = {:?}", parent_id_set.iter().collect::<Vec<_>>());
+            println!("update_parent_ids = {update_parent_ids:?}");
             let parent_ids: PrimitiveArray<T> = create_upsert_attrs_parent_id_array(
                 &mut self.id_bitmap_pool,
                 &parent_id_set,
                 &update_parent_ids,
             )?;
+
+            println!("parent_ids = {parent_ids:?}");
 
             // Attempt to coerce the AnyValue into a single column. In this case, we do this as an
             // optimization: this makes the join faster because we can take fewer columns, and it
@@ -843,7 +849,11 @@ impl AssignPipelineStage {
 
         self.id_bitmap_pool.release(parent_id_set);
 
+        println!("input batch");
+        arrow::util::pretty::print_batches(&[attrs_record_batch.clone().into_owned()]).unwrap();
         let new_attrs = upsert_attributes(&attrs_record_batch, &attrs_upserts)?;
+        println!("output batch");
+        arrow::util::pretty::print_batches(&[new_attrs.clone()]).unwrap();
         Ok(new_attrs)
     }
 
@@ -1881,6 +1891,7 @@ fn populate_upsert_attr_parent_id_values<
 where
     u32: From<T::Native>,
 {
+
     // TODO - validate that an invalid batch containing duplicate attr keys wouldn't
     // cause a panic here
     let mut upsert_attr_parent_ids = vec![T::Native::default(); parent_id_set.len() as usize];
@@ -1897,9 +1908,11 @@ where
             continue;
         }
 
+        
         // TODO safety comment
         upsert_attr_parent_ids[curr_idx] =
-            T::Native::from_usize(id as usize).expect("value in range")
+            T::Native::from_usize(id as usize).expect("value in range");
+        curr_idx += 1;
     }
 
     upsert_attr_parent_ids

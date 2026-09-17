@@ -937,7 +937,7 @@ mod test {
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(input).await.unwrap();
 
-        // verify we have the correct typ
+        // verify we have the correct type
         let logs_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
         let int_col = logs_attrs.column_by_name(consts::ATTRIBUTE_INT).unwrap();
         assert_eq!(

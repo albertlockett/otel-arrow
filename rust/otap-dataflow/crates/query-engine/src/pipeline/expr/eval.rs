@@ -363,17 +363,11 @@ pub(super) fn join_and_eval_value(
         child_results.push(result)
     }
 
-    println!("children0 = {:?}", child_results[0]);
-    println!("children1 = {:?}", child_results[1]);
-    println!("children2 = {:?}", child_results[2]);
-
     // convert ScopedValues to JoinInputs for the join boundary
     let join_inputs: Vec<JoinInput> = child_results
         .into_iter()
         .map(|sv| scoped_value_to_join_input(sv, otap_batch))
         .collect::<Result<Vec<_>>>()?;
-
-    println!("here 1");
 
     // perform the join
     // TODO in the future we should consolidate join strategy so multi-join is the only option.
@@ -382,8 +376,6 @@ pub(super) fn join_and_eval_value(
     } else {
         multi_join(&join_inputs, otap_batch)?
     };
-
-    println!("coucou 2");
 
     // evaluate the expression on the joined RecordBatch
     let LeafEval::DatafusionExpr {
