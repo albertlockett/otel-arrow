@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, BooleanBuilder, DictionaryArray, Float64Array, Int64Array,
-    PrimitiveArray, RecordBatch, StringArray, StructArray, UInt16Array, UInt32Array,
+    Array, ArrayRef, AsArray, BooleanArray, BooleanBuilder, DictionaryArray, Float64Array,
+    Int64Array, PrimitiveArray, RecordBatch, StringArray, StructArray, UInt16Array, UInt32Array,
 };
 use arrow::compute::filter_record_batch;
 use arrow::datatypes::{ArrowPrimitiveType, DataType, UInt8Type, UInt16Type, UInt32Type};
@@ -186,6 +186,52 @@ impl IdBitmap {
         self.clear();
         for id in iter {
             self.insert(id);
+        }
+    }
+
+    /// TODO comment on what this is doing
+    pub fn try_populate_from_id_column(&mut self, id_column: &ArrayRef) -> Result<()> {
+        match id_column.data_type() {
+            DataType::UInt16 => {
+                self.populate(
+                    id_column
+                        .as_primitive::<UInt16Type>()
+                        .iter()
+                        .flatten()
+                        .map(|i| i as u32),
+                );
+                Ok(())
+            }
+            DataType::UInt32 => {
+                self.populate(id_column.as_primitive::<UInt32Type>().iter().flatten());
+                Ok(())
+            }
+            DataType::Dictionary(k, _) => match k.as_ref() {
+                DataType::UInt8 => {
+                    let dict_arr = id_column.as_dictionary::<UInt8Type>();
+                    if let Some(typed_dict) = dict_arr.downcast_dict::<UInt32Array>() {
+                        self.populate(typed_dict.into_iter().flatten());
+                        Ok(())
+                    } else {
+                        todo!("invalid dict keys")
+                    }
+                }
+                DataType::UInt16 => {
+                    let dict_arr = id_column.as_dictionary::<UInt16Type>();
+                    if let Some(typed_dict) = dict_arr.downcast_dict::<UInt32Array>() {
+                        self.populate(typed_dict.into_iter().flatten());
+                        Ok(())
+                    } else {
+                        todo!("invalid dict keys")
+                    }
+                }
+                _ => {
+                    todo!("invalid dict type")
+                }
+            },
+            _ => {
+                todo!("invalid ID column type")
+            }
         }
     }
 
