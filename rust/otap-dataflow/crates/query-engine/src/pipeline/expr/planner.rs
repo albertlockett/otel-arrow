@@ -1121,6 +1121,9 @@ impl ExprPlanner {
 
         let requires_dict_downcast = left.requires_dict_downcast || right.requires_dict_downcast;
 
+        if self.record_type.is_attribute() {
+            resolve_attr_value_column_in_planned_ops(&mut left, &mut right);
+        }
         let mut expr = self.build_binary_expr(left, operator, right, requires_dict_downcast)?;
         if !either_side_literal {
             // if we're here, it means both sides of the comparison are not literals. For
@@ -1877,9 +1880,6 @@ impl ExprPlanner {
         mut right: PlannedOp,
         dict_downcast: bool,
     ) -> Result<ScopedExpr> {
-        if self.record_type.is_attribute() {
-            resolve_attr_value_column_in_planned_ops(&mut left, &mut right);
-        }
         let possible_scope = try_combine_scopes(&left, &right);
 
         if let Some(scope) = possible_scope {

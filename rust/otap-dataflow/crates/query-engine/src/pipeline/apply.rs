@@ -962,6 +962,11 @@ mod test {
         );
     }
 
+    // TODO test
+    // value + value + 2
+    // b/c one side should get coerced into an "int", and the
+    // other side might not
+
     #[tokio::test]
     async fn test_pipeline_set_missing_int_column() {
         let input = to_logs_data(vec![

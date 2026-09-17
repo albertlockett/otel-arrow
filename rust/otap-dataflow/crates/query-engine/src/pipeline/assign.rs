@@ -736,7 +736,10 @@ impl AssignPipelineStage {
             let existing_key_mask = eq(&key_column, &StringArray::new_scalar(attrs_key))?;
             let update_parent_ids = filter(&parent_ids_col, &existing_key_mask)?;
 
-            println!("parent_id_set = {:?}", parent_id_set.iter().collect::<Vec<_>>());
+            println!(
+                "parent_id_set = {:?}",
+                parent_id_set.iter().collect::<Vec<_>>()
+            );
             println!("update_parent_ids = {update_parent_ids:?}");
             let parent_ids: PrimitiveArray<T> = create_upsert_attrs_parent_id_array(
                 &mut self.id_bitmap_pool,
@@ -1891,7 +1894,6 @@ fn populate_upsert_attr_parent_id_values<
 where
     u32: From<T::Native>,
 {
-
     // TODO - validate that an invalid batch containing duplicate attr keys wouldn't
     // cause a panic here
     let mut upsert_attr_parent_ids = vec![T::Native::default(); parent_id_set.len() as usize];
@@ -1908,7 +1910,6 @@ where
             continue;
         }
 
-        
         // TODO safety comment
         upsert_attr_parent_ids[curr_idx] =
             T::Native::from_usize(id as usize).expect("value in range");
