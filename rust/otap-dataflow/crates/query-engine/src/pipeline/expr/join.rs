@@ -186,33 +186,25 @@ pub fn join<'a>(
                 Ok((join_result, left.data_scope.clone()))
             }
         }
-        (
-            // TODO - similar to the case below, I think we can relax the RecordScope::Signal constaint here
-            // but we need tests
-            DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
-            DataScope::Attribute(attr_id, _),
-        ) => {
+        (DataScope::Record(_) | DataScope::RootParent(_), DataScope::Attribute(attr_id, _)) => {
             let join_exec = RootToAttributesJoin::new(*attr_id);
             let join_result = join_exec.join(left, right, otap_batch)?;
             Ok((join_result, left.data_scope.clone()))
         }
-        (
-            DataScope::Attribute(attr_id, _),
-            // TODO - I think this can just be DataScope::Record(_) but we'll need to
-            // have a test that exercises the 2 way join here
-            DataScope::Record(RecordScope::Signal) | DataScope::RootParent(_),
-        ) => match attr_id {
-            AttributesIdentifier::Record(_) => {
-                let join_exec = RootAttrsToRootJoin::new();
-                let join_result = join_exec.join(left, right, otap_batch)?;
-                Ok((join_result, left.data_scope.clone()))
+        (DataScope::Attribute(attr_id, _), DataScope::Record(_) | DataScope::RootParent(_)) => {
+            match attr_id {
+                AttributesIdentifier::Record(_) => {
+                    let join_exec = RootAttrsToRootJoin::new();
+                    let join_result = join_exec.join(left, right, otap_batch)?;
+                    Ok((join_result, left.data_scope.clone()))
+                }
+                AttributesIdentifier::NonRecord(payload_type) => {
+                    let join_exec = NonRootAttrsToRootReverseJoin::new(*payload_type);
+                    let join_result = join_exec.join(left, right, otap_batch)?;
+                    Ok((join_result, right.data_scope.clone()))
+                }
             }
-            AttributesIdentifier::NonRecord(payload_type) => {
-                let join_exec = NonRootAttrsToRootReverseJoin::new(*payload_type);
-                let join_result = join_exec.join(left, right, otap_batch)?;
-                Ok((join_result, right.data_scope.clone()))
-            }
-        },
+        }
         (DataScope::Record(_) | DataScope::RootParent(_), DataScope::AttributesAll(_)) => {
             let join_exec = AttributesAllSelectionVecJoin::new(false);
             let join_result = join_exec.join(left, right, otap_batch)?;
@@ -1012,8 +1004,11 @@ impl JoinExec for RootToAttributesJoin {
         right: &JoinInput,
         otap_batch: &OtapArrowRecords,
     ) -> Result<RecordBatch> {
-        let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
         let to_take = self.rows_to_take(left, right, otap_batch)?;
+        let right_parent_ids = right
+            .parent_ids
+            .as_ref()
+            .ok_or_else(|| missing_column_err(consts::PARENT_ID))?;
         let right_values = right.values.to_array(right_parent_ids.len())?;
         let joined_arr = take(&right_values, &to_take, None)?;
 
@@ -1068,8 +1063,11 @@ impl JoinExec for RootAttrsToRootJoin {
         right: &JoinInput,
         otap_batch: &OtapArrowRecords,
     ) -> Result<RecordBatch> {
-        let right_ids = extract_u16_array(right.ids.as_ref(), consts::ID)?;
         let to_take = self.rows_to_take(left, right, otap_batch)?;
+        let right_ids = right
+            .ids
+            .as_ref()
+            .ok_or_else(|| missing_column_err(consts::ID))?;
         let right_values = right.values.to_array(right_ids.len())?;
         let joined_arr = take(&right_values, &to_take, None)?;
 
@@ -1269,7 +1267,10 @@ impl JoinExec for AttributeToSameAttributeJoin {
         let to_take = self.rows_to_take(left, right, otap_batch)?;
 
         // take right side values and produce result
-        let right_parent_ids = extract_u16_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
+        let right_parent_ids = right
+            .parent_ids
+            .as_ref()
+            .ok_or_else(|| missing_column_err(consts::PARENT_ID))?;
         let right_values = right.values.to_array(right_parent_ids.len())?;
         let joined_arr = take(&right_values, &to_take, None)?;
         to_join_result(left, joined_arr)

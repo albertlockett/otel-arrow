@@ -50,7 +50,7 @@ use otel_arrow_dfe_pdata::otap::transform::concatenate::{
     Cardinality, FieldInfo, estimate_cardinality,
 };
 use otel_arrow_dfe_pdata::otap::transform::upsert_attributes::{
-    AttributeUpsert, EMPTY_U16_ATTRS_RECORD_BATCH, upsert_attributes,
+    AttributeUpsert, EMPTY_U16_ATTRS_RECORD_BATCH, EMPTY_U32_ATTRS_RECORD_BATCH, upsert_attributes,
 };
 use otel_arrow_dfe_pdata::otlp::attributes::{
     AttributeValueType,
@@ -643,6 +643,9 @@ impl AssignPipelineStage {
         let attrs_record_batch = match otap_batch.get(attrs_payload_type) {
             Some(attrs_batch) => Cow::Borrowed(attrs_batch),
             None => {
+                // TODO - avoid record batch clone here
+                // https://github.com/open-telemetry/otel-arrow/issues/3988
+                //
                 // add an indicator to the parent id column that it is not transport/delta encoded.
                 // the upsert_attrs function assumes that transport/delta encoding has already been
                 // removed from the parent ID.
@@ -736,18 +739,11 @@ impl AssignPipelineStage {
             let existing_key_mask = eq(&key_column, &StringArray::new_scalar(attrs_key))?;
             let update_parent_ids = filter(&parent_ids_col, &existing_key_mask)?;
 
-            println!(
-                "parent_id_set = {:?}",
-                parent_id_set.iter().collect::<Vec<_>>()
-            );
-            println!("update_parent_ids = {update_parent_ids:?}");
             let parent_ids: PrimitiveArray<T> = create_upsert_attrs_parent_id_array(
                 &mut self.id_bitmap_pool,
                 &parent_id_set,
                 &update_parent_ids,
             )?;
-
-            println!("parent_ids = {parent_ids:?}");
 
             // Attempt to coerce the AnyValue into a single column. In this case, we do this as an
             // optimization: this makes the join faster because we can take fewer columns, and it
@@ -801,19 +797,6 @@ impl AssignPipelineStage {
                         &eval_result,
                         &otap_batch,
                     )?,
-                    // TODO - remove this code block - comment is no longer true
-                    // DataScope::Record(RecordScope::Child(_child)) => {
-                    //     // In the current implementation, we shouldn't end up here. The planner
-                    //     // should not allow us to create an expression that would evaluate on some
-                    //     // child record (like metric data points), and assign the result to an
-                    //     // attribute. Returning this error to be defensive
-                    //     return Err(Error::ExecutionError {
-                    //         cause: format!(
-                    //             "unexpected DataScope for attribute assignment `{:?}`",
-                    //             eval_result.data_scope
-                    //         ),
-                    //     });
-                    // }
                     DataScope::StaticScalar => {
                         // safety: if the data scope was scalar, the result would have also been a
                         // Scalar which would have been handled above where we checked the
@@ -852,11 +835,7 @@ impl AssignPipelineStage {
 
         self.id_bitmap_pool.release(parent_id_set);
 
-        println!("input batch");
-        arrow::util::pretty::print_batches(&[attrs_record_batch.clone().into_owned()]).unwrap();
         let new_attrs = upsert_attributes(&attrs_record_batch, &attrs_upserts)?;
-        println!("output batch");
-        arrow::util::pretty::print_batches(&[new_attrs.clone()]).unwrap();
         Ok(new_attrs)
     }
 
@@ -1575,7 +1554,20 @@ impl PipelineStage for AssignPipelineStage {
                 let attrs_record_batch = match otap_batch.get(attrs_payload_type) {
                     Some(dp_attrs) => Cow::Borrowed(dp_attrs),
                     None => {
-                        todo!()
+                        // TODO - avoid the record batch clone here
+                        // https://github.com/open-telemetry/otel-arrow/issues/3988
+                        //
+                        // add an indicator to the parent id column that it is not transport/delta encoded.
+                        // the upsert_attrs function assumes that transport/delta encoding has already been
+                        // removed from the parent ID.
+                        let batch = EMPTY_U32_ATTRS_RECORD_BATCH.deref();
+                        let schema = batch.schema_ref();
+                        Cow::Owned(RecordBatch::new_empty(Arc::new(update_field_metadata(
+                            schema,
+                            consts::PARENT_ID,
+                            metadata::COLUMN_ENCODING,
+                            metadata::encodings::PLAIN,
+                        ))))
                     }
                 };
 

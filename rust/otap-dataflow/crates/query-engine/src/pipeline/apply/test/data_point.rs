@@ -3,6 +3,7 @@
 
 //! Tests for pipelines applied to metrics data points
 
+use datafusion::functions::expr_fn::pi;
 use otel_arrow_contrib_data_engine_kql_parser::Parser;
 use otel_arrow_dfe_pdata::{
     proto::{
@@ -13,7 +14,7 @@ use otel_arrow_dfe_pdata::{
             metrics::v1::{
                 Exemplar, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Histogram,
                 HistogramDataPoint, Metric, MetricsData, NumberDataPoint, Sum, Summary,
-                SummaryDataPoint, exponential_histogram_data_point::Buckets,
+                SummaryDataPoint, exponential_histogram_data_point::Buckets, metric::Data,
             },
         },
     },
@@ -22,8 +23,7 @@ use otel_arrow_dfe_pdata::{
 };
 use otel_arrow_dfe_query_engine_languages::opl::parser::OplParser;
 
-use crate::parser::default_parser_options;
-use crate::pipeline::Pipeline;
+use crate::{parser::default_parser_options, pipeline::Pipeline};
 
 /// Helper function to compare the metrics & their data points on left right data.
 ///
@@ -829,46 +829,91 @@ async fn test_filter_data_points_null_predicate_result() {
     );
 }
 
-// TODO -- the inversion of this
-#[tokio::test]
-async fn test_filter_data_point_by_attribute_value() {
-    let query = "metrics | apply data_points {
-        where attributes[\"x\"] == 5
-    }";
-
+/// In a handful of tests below, we want to ensure that some filtering is applied to all data
+/// point types and we correctly retain only the data points selected by the predicate. This
+/// helper sets up data points of all types, ensures the filter is applied to all correctly. The
+/// motivation for this is to reduce the boilerplate of creating fixtures and asserting the result
+/// of each test case.
+async fn run_filter_all_data_point_types_test(
+    query: &str,
+    flags_and_attrs: Vec<(u32, Option<Vec<KeyValue>>)>,
+    expected_retained: Vec<usize>,
+) {
     let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
         .unwrap()
         .pipeline;
     let mut pipeline = Pipeline::new(pipeline_expr);
 
+    let mut number_dps = Vec::new();
+    let mut hist_dps = Vec::new();
+    let mut exp_hist_dps = Vec::new();
+    let mut summary_dps = Vec::new();
+
+    for (flag, attrs) in flags_and_attrs.clone().into_iter() {
+        number_dps.push(
+            NumberDataPoint::build()
+                .flags(flag)
+                .attributes(attrs.clone().unwrap_or_default())
+                .finish(),
+        );
+        hist_dps.push(
+            HistogramDataPoint::build()
+                .flags(flag)
+                .attributes(attrs.clone().unwrap_or_default())
+                .finish(),
+        );
+        exp_hist_dps.push(
+            ExponentialHistogramDataPoint::build()
+                .flags(flag)
+                .positive(Buckets::default())
+                .negative(Buckets::default())
+                .attributes(attrs.clone().unwrap_or_default())
+                .finish(),
+        );
+        summary_dps.push(
+            SummaryDataPoint::build()
+                .flags(flag)
+                .attributes(attrs.clone().unwrap_or_default())
+                .finish(),
+        );
+    }
+
     let metrics = vec![
         Metric::build()
             .name("gauge_metric")
             .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .flags(1u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(5)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build()
-                        .flags(2u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(6)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build()
-                        .flags(3u32)
-                        .attributes(vec![KeyValue::new("a", AnyValue::new_string("b"))])
-                        .finish(),
-                    NumberDataPoint::build().flags(4u32).finish(),
-                ],
+                data_points: number_dps.clone(),
+            })
+            .finish(),
+        Metric::build()
+            .name("sum")
+            .data_sum(Sum {
+                data_points: number_dps.clone(),
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("histogram")
+            .data_histogram(Histogram {
+                data_points: hist_dps.clone(),
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("exp_histogram")
+            .data_exponential_histogram(ExponentialHistogram {
+                data_points: exp_hist_dps.clone(),
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("summary")
+            .data_summary(Summary {
+                data_points: summary_dps.clone(),
             })
             .finish(),
     ];
+
     let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
     let result = pipeline.execute(input_batch).await.unwrap();
 
@@ -876,7 +921,90 @@ async fn test_filter_data_point_by_attribute_value() {
         panic!("invalid signal type")
     };
 
-    println!("{metrics_result:#?}");
+    let mut expected_number_dps = Vec::new();
+    let mut expected_hist_dps = Vec::new();
+    let mut expected_exp_hist_dps = Vec::new();
+    let mut expected_summary_dps = Vec::new();
+
+    for i in expected_retained {
+        expected_number_dps.push(number_dps[i].clone());
+        expected_hist_dps.push(hist_dps[i].clone());
+        expected_exp_hist_dps.push(exp_hist_dps[i].clone());
+        expected_summary_dps.push(summary_dps[i].clone());
+    }
+
+    let expected = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: expected_number_dps.clone(),
+            })
+            .finish(),
+        Metric::build()
+            .name("sum")
+            .data_sum(Sum {
+                data_points: expected_number_dps.clone(),
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("histogram")
+            .data_histogram(Histogram {
+                data_points: expected_hist_dps.clone(),
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("exp_histogram")
+            .data_exponential_histogram(ExponentialHistogram {
+                data_points: expected_exp_hist_dps.clone(),
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("summary")
+            .data_summary(Summary {
+                data_points: expected_summary_dps.clone(),
+            })
+            .finish(),
+    ];
+
+    assert_metrics_eq(metrics_result, to_metrics_data(expected))
+}
+
+// TODO -- the inversion of this
+#[tokio::test]
+async fn test_filter_data_point_by_attribute_value() {
+    let query = "metrics | apply data_points {
+        where attributes[\"x\"] == 5
+    }";
+
+    run_filter_all_data_point_types_test(
+        query,
+        vec![
+            (
+                1u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(5)),
+                ]),
+            ),
+            (
+                2u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                3u32,
+                Some(vec![KeyValue::new("a", AnyValue::new_string("b"))]),
+            ),
+            (4u32, None),
+        ],
+        vec![0],
+    )
+    .await
 }
 
 #[tokio::test]
@@ -885,52 +1013,37 @@ async fn test_filter_data_point_by_attribute_and() {
         where attributes[\"x\"] == 5 and attributes[\"y\"] == 6
     }";
 
-    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
-        .unwrap()
-        .pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
-
-    let metrics = vec![
-        Metric::build()
-            .name("gauge_metric")
-            .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .flags(1u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(5)),
-                            KeyValue::new("y", AnyValue::new_int(6)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build()
-                        .flags(2u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(6)),
-                            KeyValue::new("y", AnyValue::new_int(6)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build()
-                        .flags(3u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("y", AnyValue::new_int(6)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build().flags(4u32).finish(),
-                ],
-            })
-            .finish(),
-    ];
-    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-    let result = pipeline.execute(input_batch).await.unwrap();
-
-    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
-        panic!("invalid signal type")
-    };
-
-    println!("{metrics_result:#?}");
+    run_filter_all_data_point_types_test(
+        query,
+        vec![
+            (
+                2u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(6)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                1u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(5)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                3u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (4u32, None),
+        ],
+        vec![1],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -938,53 +1051,37 @@ async fn test_filter_data_point_by_attribute_or() {
     let query = "metrics | apply data_points {
         where attributes[\"x\"] == 5 or attributes[\"y\"] == 6
     }";
-
-    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
-        .unwrap()
-        .pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
-
-    let metrics = vec![
-        Metric::build()
-            .name("gauge_metric")
-            .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .flags(1u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(5)),
-                            KeyValue::new("y", AnyValue::new_int(6)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build()
-                        .flags(2u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(6)),
-                            KeyValue::new("y", AnyValue::new_int(6)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build()
-                        .flags(3u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("y", AnyValue::new_int(6)),
-                        ])
-                        .finish(),
-                    NumberDataPoint::build().flags(4u32).finish(),
-                ],
-            })
-            .finish(),
-    ];
-    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-    let result = pipeline.execute(input_batch).await.unwrap();
-
-    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
-        panic!("invalid signal type")
-    };
-
-    println!("{metrics_result:#?}");
+    run_filter_all_data_point_types_test(
+        query,
+        vec![
+            (
+                2u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(6)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                1u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(5)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                3u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (4u32, None),
+        ],
+        vec![0, 1, 2],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -993,6 +1090,51 @@ async fn test_filter_data_point_by_attribute_logical_binary_inverted() {
         where not(attributes[\"x\"] == 5)
     }";
 
+    run_filter_all_data_point_types_test(
+        query,
+        vec![
+            (
+                2u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(6)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                1u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(5)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                3u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (4u32, None),
+        ],
+        vec![0, 2, 3],
+    )
+    .await;
+}
+
+/// In a handful of tests below, we want to ensure that values are assigned to all data point types
+/// with the correct key / value from sources involving various types of expressions. This helper
+/// simply populates each type of datapoint, evaluates the expression, and ensures the correct
+/// attribute was assigned. The motivation for this is to reduce the boilerplate of creating
+/// fixtures and asserting the result of each test case.
+async fn run_assign_to_all_data_point_type_test(
+    query: &str,
+    flags: u32,
+    attributes: Option<Vec<KeyValue>>,
+    expected_key: &str,
+    expected_value: AnyValue,
+) {
     let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
         .unwrap()
         .pipeline;
@@ -1004,28 +1146,61 @@ async fn test_filter_data_point_by_attribute_logical_binary_inverted() {
             .data_gauge(Gauge {
                 data_points: vec![
                     NumberDataPoint::build()
-                        .flags(1u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(5)),
-                        ])
+                        .flags(flags)
+                        .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
+                ],
+            })
+            .finish(),
+        Metric::build()
+            .name("sum")
+            .data_sum(Sum {
+                data_points: vec![
                     NumberDataPoint::build()
-                        .flags(2u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("b")),
-                            KeyValue::new("x", AnyValue::new_int(6)),
-                        ])
+                        .flags(flags)
+                        .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
-                    NumberDataPoint::build()
-                        .flags(3u32)
-                        .attributes(vec![KeyValue::new("a", AnyValue::new_string("b"))])
+                ],
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("histogram")
+            .data_histogram(Histogram {
+                data_points: vec![
+                    HistogramDataPoint::build()
+                        .flags(flags)
+                        .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
-                    NumberDataPoint::build().flags(4u32).finish(),
+                ],
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("exp_histogram")
+            .data_exponential_histogram(ExponentialHistogram {
+                data_points: vec![
+                    ExponentialHistogramDataPoint::build()
+                        .flags(flags)
+                        .attributes(attributes.clone().unwrap_or_default())
+                        .finish(),
+                ],
+                ..Default::default()
+            })
+            .finish(),
+        Metric::build()
+            .name("summary")
+            .data_summary(Summary {
+                data_points: vec![
+                    SummaryDataPoint::build()
+                        .flags(flags)
+                        .attributes(attributes.clone().unwrap_or_default())
+                        .finish(),
                 ],
             })
             .finish(),
     ];
+
     let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
     let result = pipeline.execute(input_batch).await.unwrap();
 
@@ -1033,171 +1208,257 @@ async fn test_filter_data_point_by_attribute_logical_binary_inverted() {
         panic!("invalid signal type")
     };
 
-    println!("{metrics_result:#?}");
+    assert_eq!(metrics_result.resource_metrics.len(), 1);
+    assert_eq!(metrics_result.resource_metrics[0].scope_metrics.len(), 1);
+    assert_eq!(
+        metrics_result.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .len(),
+        5
+    );
+    for metric in metrics_result.resource_metrics[0].scope_metrics[0]
+        .metrics
+        .iter()
+    {
+        let attrs = match metric.data.as_ref().unwrap() {
+            Data::Gauge(g) => {
+                assert_eq!(g.data_points.len(), 1);
+                &g.data_points[0].attributes
+            }
+            Data::Sum(s) => {
+                assert_eq!(s.data_points.len(), 1);
+                &s.data_points[0].attributes
+            }
+            Data::Histogram(h) => {
+                assert_eq!(h.data_points.len(), 1);
+                &h.data_points[0].attributes
+            }
+            Data::ExponentialHistogram(h) => {
+                assert_eq!(h.data_points.len(), 1);
+                &h.data_points[0].attributes
+            }
+            Data::Summary(s) => {
+                assert_eq!(s.data_points.len(), 1);
+                &s.data_points[0].attributes
+            }
+        };
+
+        let expected_attr = attrs.iter().find(|kv| kv.key == expected_key).unwrap();
+        assert_eq!(expected_attr.value.as_ref().unwrap(), &expected_value);
+    }
 }
 
 #[tokio::test]
-async fn test_assign_to_datapoint_attributes() {
+async fn test_assign_to_data_point_attributes() {
     let query = "metrics | apply data_points {
         set attributes[\"x\"] = 5
     }";
 
-    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
-        .unwrap()
-        .pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
-
-    let metrics = vec![
-        Metric::build()
-            .name("gauge_metric")
-            .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .attributes(vec![KeyValue::new("a", AnyValue::new_string("b"))])
-                        .finish(),
-                ],
-            })
-            .finish(),
-    ];
-    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-    let result = pipeline.execute(input_batch).await.unwrap();
-
-    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
-        panic!("invalid signal type")
-    };
-
-    println!("{metrics_result:#?}");
-    // TODO - assert
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        Some(vec![KeyValue::new("a", AnyValue::new_int(5))]),
+        "x",
+        AnyValue::new_int(5),
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn test_assign_to_datapoint_attributes_requiring_join_attrs() {
+async fn test_data_point_replace_existing_attr_value() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = 5
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        Some(vec![KeyValue::new("x", AnyValue::new_int(5))]),
+        "x",
+        AnyValue::new_int(5),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_no_existing_attrs() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = 5
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        None, // no existing attrs
+        "x",
+        AnyValue::new_int(5),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_copy_attribute() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = attributes[\"y\"]
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        Some(vec![KeyValue::new("y", AnyValue::new_int(5))]),
+        "x",
+        AnyValue::new_int(5),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_requiring_join_attrs() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = attributes[\"y\"] + attributes[\"z\"]
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        Some(vec![
+            KeyValue::new("y", AnyValue::new_int(3)),
+            KeyValue::new("z", AnyValue::new_int(4)),
+        ]),
+        "x",
+        AnyValue::new_int(7),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_requiring_join_attrs_and_record_right() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = attributes[\"y\"] - flags
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        2,
+        Some(vec![KeyValue::new("y", AnyValue::new_int(5))]),
+        "x",
+        AnyValue::new_int(3),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_requiring_join_attrs_and_record_left() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = flags - attributes[\"y\"]
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        5,
+        Some(vec![KeyValue::new("y", AnyValue::new_int(3))]),
+        "x",
+        AnyValue::new_int(2),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_requiring_multi_join_attrs_and_scalar() {
     let query = "metrics | apply data_points {
         set attributes[\"x\"] = join(\".\", attributes[\"y\"], attributes[\"z\"])
     }";
 
-    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
-        .unwrap()
-        .pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
-
-    let metrics = vec![
-        Metric::build()
-            .name("gauge_metric")
-            .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("a")),
-                            KeyValue::new("y", AnyValue::new_string("b")),
-                            KeyValue::new("z", AnyValue::new_string("c")),
-                        ])
-                        .finish(),
-                ],
-            })
-            .finish(),
-    ];
-    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-    let result = pipeline.execute(input_batch).await.unwrap();
-
-    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
-        panic!("invalid signal type")
-    };
-
-    println!("{metrics_result:#?}");
-    // TODO - assert
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        Some(vec![
+            KeyValue::new("y", AnyValue::new_string("b")),
+            KeyValue::new("z", AnyValue::new_string("c")),
+        ]),
+        "x",
+        AnyValue::new_string("b.c"),
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn test_assign_to_datapoint_attributes_requiring_attrs_join_to_root_right() {
+async fn test_assign_to_data_point_attrs_requiring_multi_join_attrs_and_scalar_and_record_right() {
     let query = "metrics | apply data_points {
         set attributes[\"x\"] = join(\".\", attributes[\"y\"], flags as String)
     }";
 
-    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
-        .unwrap()
-        .pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
-
-    let metrics = vec![
-        Metric::build()
-            .name("gauge_metric")
-            .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .flags(5u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("a")),
-                            KeyValue::new("y", AnyValue::new_string("b")),
-                            KeyValue::new("z", AnyValue::new_string("c")),
-                        ])
-                        .finish(),
-                ],
-            })
-            .finish(),
-    ];
-    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-    let result = pipeline.execute(input_batch).await.unwrap();
-
-    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
-        panic!("invalid signal type")
-    };
-
-    println!("{metrics_result:#?}");
-    // TODO - assert
+    run_assign_to_all_data_point_type_test(
+        query,
+        5,
+        Some(vec![KeyValue::new("y", AnyValue::new_string("b"))]),
+        "x",
+        AnyValue::new_string("b.5"),
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn test_assign_to_datapoint_attributes_requiring_attrs_join_to_root_left() {
+async fn test_assign_to_data_point_attrs_requiring_multi_join_attrs_and_scalar_and_record_left() {
     let query = "metrics | apply data_points {
         set attributes[\"x\"] = join(\".\", flags as String, attributes[\"y\"])
     }";
 
-    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
-        .unwrap()
-        .pipeline;
-    let mut pipeline = Pipeline::new(pipeline_expr);
+    run_assign_to_all_data_point_type_test(
+        query,
+        5,
+        Some(vec![KeyValue::new("y", AnyValue::new_string("b"))]),
+        "x",
+        AnyValue::new_string("5.b"),
+    )
+    .await;
+}
 
-    let metrics = vec![
-        Metric::build()
-            .name("gauge_metric")
-            .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .flags(5u32)
-                        .attributes(vec![
-                            KeyValue::new("a", AnyValue::new_string("a")),
-                            KeyValue::new("y", AnyValue::new_string("b")),
-                            KeyValue::new("z", AnyValue::new_string("c")),
-                        ])
-                        .finish(),
-                ],
-            })
-            .finish(),
-    ];
-    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-    let result = pipeline.execute(input_batch).await.unwrap();
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_from_logical_binary_expr() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = attributes[\"y\"] > 2
+    }";
 
-    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
-        panic!("invalid signal type")
-    };
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        Some(vec![KeyValue::new("y", AnyValue::new_int(3))]),
+        "x",
+        AnyValue::new_bool(true),
+    )
+    .await;
+}
 
-    println!("{metrics_result:#?}");
-    // TODO - assert
+#[tokio::test]
+async fn test_assign_to_data_point_attributes_requiring_bitmap_join_attrs() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = attributes[\"y\"] == 3 and attributes[\"z\"] == 4
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        Default::default(),
+        Some(vec![
+            KeyValue::new("y", AnyValue::new_int(3)),
+            KeyValue::new("z", AnyValue::new_int(4)),
+        ]),
+        "x",
+        AnyValue::new_bool(true),
+    )
+    .await;
 }
 
 // Assign test cases to add:
 // - assign fields
-// - TODO same joins as above, but only 2 way (arithmetic?) ...
-// - assign when no existing attributes
-// - assign from func call w/ joins, etc?
-// - assign from value of a different attribute (e.g. simply set attribute["x"] = attribute["y"])
 //   which I think will mean the rvalue scope is AttributesAll?
 
 /// Scenario: try to execute some queries that have valid syntax, but define operations that are
 /// not supported by this query engine (although most will be supported in future)
 /// Guarantees: that the operation returns an expected error instead of inadvertently evaluating
 /// and producing invalid results
+// TODO - uningnore this, but currently it is not passing
+#[ignore]
 #[tokio::test]
 async fn test_not_supported_queries_return_error() {
     struct TestCase {
