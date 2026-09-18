@@ -100,7 +100,6 @@ impl ScopedExpr {
         otap_batch: &OtapArrowRecords,
         eval_ctx: &EvalContext<'_>,
     ) -> Result<Option<ScopedValue>> {
-        println!("eval as value {self:?}");
         match self {
             Self::Eval { scope, eval } => {
                 eval_datafusion_expr_value(scope, eval, otap_batch, eval_ctx)

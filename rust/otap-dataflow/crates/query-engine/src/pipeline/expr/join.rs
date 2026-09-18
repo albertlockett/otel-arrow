@@ -120,7 +120,7 @@ impl JoinInput {
             values,
             data_scope,
             ids: None,
-            parent_ids: Some(Arc::new(parent_ids.clone())),
+            parent_ids: Some(parent_ids),
             scope_ids: None,
             resource_ids: None,
         }

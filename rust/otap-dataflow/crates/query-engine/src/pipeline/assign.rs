@@ -591,83 +591,10 @@ impl AssignPipelineStage {
         Ok(otap_batch)
     }
 
-    fn root_assign_attr_inputs<'a>(
-        otap_batch: &'a OtapArrowRecords,
-        root_record_batch: &'a RecordBatch,
-        dest_attrs_id: AttributesIdentifier,
-    ) -> Result<(Cow<'a, RecordBatch>, ArrowPayloadType, Option<ArrayRef>)> {
-        let (attrs_payload_type, id_col) = match dest_attrs_id {
-            AttributesIdentifier::Record(RecordScope::Signal) => {
-                let attrs_payload_type = match otap_batch {
-                    OtapArrowRecords::Logs(_) => ArrowPayloadType::LogAttrs,
-                    OtapArrowRecords::Metrics(_) => ArrowPayloadType::MetricAttrs,
-                    OtapArrowRecords::Traces(_) => ArrowPayloadType::SpanAttrs,
-                };
-                let id_col = root_record_batch.column_by_name(consts::ID);
-                (attrs_payload_type, id_col)
-            }
-            AttributesIdentifier::Record(RecordScope::Child(child)) => {
-                todo!("this needs to be extracted into a helper that we pass the stuff in ");
-            }
-            AttributesIdentifier::NonRecord(payload_type) => {
-                let struct_col_name = match payload_type {
-                    ArrowPayloadType::ResourceAttrs => consts::RESOURCE,
-                    ArrowPayloadType::ScopeAttrs => consts::SCOPE,
-                    other => {
-                        return Err(Error::InvalidPipelineError {
-                            cause: format!("Unsupported attributes payload type {other:?}"),
-                            query_location: None,
-                        });
-                    }
-                };
-
-                // access the ID column from the nested Resource/Scope struct
-                let id_col = root_record_batch
-                    .column_by_name(struct_col_name)
-                    .map(|s| {
-                        s.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
-                            Error::ExecutionError {
-                                cause: format!(
-                                    "invalid struct column. found type {:?}",
-                                    s.data_type()
-                                ),
-                            }
-                        })
-                    })
-                    .transpose()?
-                    .and_then(|s| s.column_by_name(consts::ID));
-                (payload_type, id_col)
-            }
-        };
-
-        let attrs_record_batch = match otap_batch.get(attrs_payload_type) {
-            Some(attrs_batch) => Cow::Borrowed(attrs_batch),
-            None => {
-                // TODO - avoid record batch clone here
-                // https://github.com/open-telemetry/otel-arrow/issues/3988
-                //
-                // add an indicator to the parent id column that it is not transport/delta encoded.
-                // the upsert_attrs function assumes that transport/delta encoding has already been
-                // removed from the parent ID.
-                let batch = EMPTY_U16_ATTRS_RECORD_BATCH.deref();
-                let schema = batch.schema_ref();
-                Cow::Owned(RecordBatch::new_empty(Arc::new(update_field_metadata(
-                    schema,
-                    consts::PARENT_ID,
-                    metadata::COLUMN_ENCODING,
-                    metadata::encodings::PLAIN,
-                ))))
-            }
-        };
-
-        Ok((attrs_record_batch, attrs_payload_type, id_col.cloned()))
-    }
-
     fn assign_to_attributes<T: ArrowPrimitiveType>(
         &mut self,
         otap_batch: &OtapArrowRecords,
         id_col: Option<ArrayRef>,
-        attrs_payload_type: ArrowPayloadType,
         attrs_record_batch: Cow<'_, RecordBatch>,
         eval_results: &mut [Option<ScopedValue>],
         dest_attrs_id: AttributesIdentifier,
@@ -680,15 +607,12 @@ impl AssignPipelineStage {
             let id_col = id_col
                 .as_any()
                 .downcast_ref::<PrimitiveArray<T>>()
-                .ok_or_else(|| {
-                    println!("here");
-                    Error::ExecutionError {
-                        // TODO - this is the wrong expected error type
-                        cause: format!(
-                            "invalid ID column. expected u16 type, found {:?}",
-                            id_col.data_type()
-                        ),
-                    }
+                .ok_or_else(|| Error::ExecutionError {
+                    cause: format!(
+                        "invalid ID column. expected {:?} type, found {:?}",
+                        T::DATA_TYPE,
+                        id_col.data_type()
+                    ),
                 })?;
             parent_id_set.populate(id_col.iter().flatten().map(|i| i.into()));
         }
@@ -715,8 +639,6 @@ impl AssignPipelineStage {
                 // in the constructor that all dest_columns are the same variant.
                 unreachable!("invalid column accessor variant")
             };
-
-            println!("eval_results = {eval_result:?}");
 
             // if the evaluation of the expression turned out to be null, we'll create
             // empty attributes from the Null scalar value.
@@ -856,8 +778,18 @@ impl AssignPipelineStage {
                 OtapArrowRecords::Traces(_) => ArrowPayloadType::SpanAttrs,
             },
             AttributesIdentifier::NonRecord(payload_type) => payload_type,
-            AttributesIdentifier::Record(RecordScope::Child(_)) => {
-                todo!("need to handle this")
+            AttributesIdentifier::Record(RecordScope::Child(child)) => {
+                // Currently this function is called only in the context of evaluating the
+                // assignment on the signal. In that context, if we receive a desired assignment
+                // destination of the nested attribute of some child record batch (like data
+                // points) there has been an error in the planner so we consider this situation
+                // invalid in this location for now.
+                return Err(Error::InvalidPipelineError {
+                    cause: format!(
+                        "Cannot assign nested attribute of child {child:?} when executing pipeline on signal"
+                    ),
+                    query_location: Default::default(),
+                });
             }
         };
 
@@ -933,7 +865,6 @@ impl AssignPipelineStage {
                 let left_join_input = &JoinInput::new_with_parent_ids(
                     ColumnarValue::Scalar(ScalarValue::Null),
                     Rc::clone(&self.dest_scopes[i]),
-                    // TODO ugh the new Arc!
                     Arc::new(update_parent_ids_u16.clone()),
                 );
 
@@ -1135,15 +1066,78 @@ impl PipelineStage for AssignPipelineStage {
                 eval_results.push(eval_result);
             }
 
-            // TODO - is this is an ugly signature?
-            let (attrs_record_batch, attrs_payload_type, id_column) =
-                Self::root_assign_attr_inputs(&otap_batch, root_record_batch, *attrs_id)?;
+            let (attrs_payload_type, id_column) = match *attrs_id {
+                AttributesIdentifier::Record(RecordScope::Signal) => {
+                    let attrs_payload_type = match otap_batch {
+                        OtapArrowRecords::Logs(_) => ArrowPayloadType::LogAttrs,
+                        OtapArrowRecords::Metrics(_) => ArrowPayloadType::MetricAttrs,
+                        OtapArrowRecords::Traces(_) => ArrowPayloadType::SpanAttrs,
+                    };
+                    let id_col = root_record_batch.column_by_name(consts::ID);
+                    (attrs_payload_type, id_col)
+                }
+                AttributesIdentifier::Record(RecordScope::Child(child)) => {
+                    return Err(Error::InvalidPipelineError {
+                        cause: format!(
+                            "Cannot assign attribute of child {child:?} when executing pipeline on signal"
+                        ),
+                        query_location: Default::default(),
+                    });
+                }
+                AttributesIdentifier::NonRecord(payload_type) => {
+                    let struct_col_name = match payload_type {
+                        ArrowPayloadType::ResourceAttrs => consts::RESOURCE,
+                        ArrowPayloadType::ScopeAttrs => consts::SCOPE,
+                        other => {
+                            return Err(Error::InvalidPipelineError {
+                                cause: format!("Unsupported attributes payload type {other:?}"),
+                                query_location: None,
+                            });
+                        }
+                    };
 
-            // TODO - is this now an ugly signature?
+                    // access the ID column from the nested Resource/Scope struct
+                    let id_col = root_record_batch
+                        .column_by_name(struct_col_name)
+                        .map(|s| {
+                            s.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
+                                Error::ExecutionError {
+                                    cause: format!(
+                                        "invalid struct column. found type {:?}",
+                                        s.data_type()
+                                    ),
+                                }
+                            })
+                        })
+                        .transpose()?
+                        .and_then(|s| s.column_by_name(consts::ID));
+                    (payload_type, id_col)
+                }
+            };
+
+            let attrs_record_batch = match otap_batch.get(attrs_payload_type) {
+                Some(attrs_batch) => Cow::Borrowed(attrs_batch),
+                None => {
+                    // TODO - avoid record batch clone here
+                    // https://github.com/open-telemetry/otel-arrow/issues/3988
+                    //
+                    // add an indicator to the parent id column that it is not transport/delta encoded.
+                    // the upsert_attrs function assumes that transport/delta encoding has already been
+                    // removed from the parent ID.
+                    let batch = EMPTY_U16_ATTRS_RECORD_BATCH.deref();
+                    let schema = batch.schema_ref();
+                    Cow::Owned(RecordBatch::new_empty(Arc::new(update_field_metadata(
+                        schema,
+                        consts::PARENT_ID,
+                        metadata::COLUMN_ENCODING,
+                        metadata::encodings::PLAIN,
+                    ))))
+                }
+            };
+
             let new_attrs = self.assign_to_attributes::<UInt16Type>(
                 &otap_batch,
-                id_column,
-                attrs_payload_type,
+                id_column.cloned(),
                 attrs_record_batch,
                 &mut eval_results,
                 *attrs_id,
@@ -1568,7 +1562,6 @@ impl PipelineStage for AssignPipelineStage {
                 let new_attrs = self.assign_to_attributes::<UInt32Type>(
                     &otap_batch,
                     id_col.cloned(),
-                    attrs_payload_type,
                     attrs_record_batch,
                     &mut eval_results,
                     *attrs_id,
@@ -1838,84 +1831,117 @@ impl NextIdTracker {
     }
 }
 
-/// TODO commentary
+/// Creates a primitive array containing the `parent_id`s which is an argument to
+/// `upsert_attributes`. This is supposed containing the `parent_id` for the attributes that will
+/// be created/updated, in a specific order where all the updates are followed by all the inserts.
+///
+///
+/// # Arguments:
+///
+/// - `id_bitmap_pool` - mutable ID bitmap pool (for access to reusable scratch id bitmap)
+/// - `all_parent_id_set` - bitmap containing all parent IDs that should contain the attribute
+/// - `update_parent_ids` - array containing that already contain the attribute and hence should
+///   have their attribute value updated.
+///
+/// This returns an error if column type which is passed is not a valid ID column.
 fn create_upsert_attrs_parent_id_array<T: ArrowPrimitiveType>(
     id_bitmap_pool: &mut IdBitmapPool,
-    parent_id_set: &IdBitmap,
+    all_parent_id_set: &IdBitmap,
     update_parent_ids: &ArrayRef,
 ) -> Result<PrimitiveArray<T>>
 where
     u32: From<<T as ArrowPrimitiveType>::Native>,
 {
     let mut update_parent_id_set = id_bitmap_pool.acquire();
-    let upsert_parent_ids = if let Some(parent_id_col_primitive) =
+    let upsert_parent_ids_values_buffer = if let Some(parent_id_col_primitive) =
         update_parent_ids.as_primitive_opt::<T>()
     {
         update_parent_id_set.populate(parent_id_col_primitive.iter().flatten().map(|i| i.into()));
-        populate_upsert_attr_parent_id_values::<T, _>(
+        create_upsert_attrs_values_buffer_from_iter::<T, _>(
             parent_id_col_primitive.iter(),
-            parent_id_set,
+            all_parent_id_set,
             &update_parent_id_set,
         )
     } else if let Some(parent_id_col_dict) = update_parent_ids.as_dictionary_opt::<UInt8Type>() {
         if let Some(typed_dict) = parent_id_col_dict.downcast_dict::<PrimitiveArray<T>>() {
             update_parent_id_set
                 .populate(typed_dict.clone().into_iter().flatten().map(|i| i.into()));
-            populate_upsert_attr_parent_id_values::<T, _>(
+            create_upsert_attrs_values_buffer_from_iter::<T, _>(
                 typed_dict.into_iter(),
-                parent_id_set,
                 &update_parent_id_set,
+                all_parent_id_set,
             )
         } else {
-            todo!()
+            return Err(otel_arrow_dfe_pdata::error::Error::InvalidIdColumnType {
+                data_type: update_parent_ids.data_type().clone(),
+            }
+            .into());
+        }
+    } else if let Some(parent_id_col_dict) = update_parent_ids.as_dictionary_opt::<UInt16Type>() {
+        if let Some(typed_dict) = parent_id_col_dict.downcast_dict::<PrimitiveArray<T>>() {
+            update_parent_id_set
+                .populate(typed_dict.clone().into_iter().flatten().map(|i| i.into()));
+            create_upsert_attrs_values_buffer_from_iter::<T, _>(
+                typed_dict.into_iter(),
+                &update_parent_id_set,
+                all_parent_id_set,
+            )
+        } else {
+            return Err(otel_arrow_dfe_pdata::error::Error::InvalidIdColumnType {
+                data_type: update_parent_ids.data_type().clone(),
+            }
+            .into());
         }
     } else {
         // invalid type column
-        todo!()
+        return Err(otel_arrow_dfe_pdata::error::Error::InvalidIdColumnType {
+            data_type: update_parent_ids.data_type().clone(),
+        }
+        .into());
     };
 
     id_bitmap_pool.release(update_parent_id_set);
-    Ok(PrimitiveArray::new(
-        ScalarBuffer::from(upsert_parent_ids),
-        None,
-    ))
+    Ok(PrimitiveArray::new(upsert_parent_ids_values_buffer, None))
 }
 
-// TODO - bad function name and commentary
-fn populate_upsert_attr_parent_id_values<
+/// Creates a values buffer for the `parent_id`s which is an argument to `upsert_attributes`. This
+/// is supposed containing the `parent_id` for the attributes that will be created/updated, in a
+/// specific order where all the updates are followed by all the inserts.
+fn create_upsert_attrs_values_buffer_from_iter<
     T: ArrowPrimitiveType,
-    I: Iterator<Item = Option<T::Native>>,
+    I: ExactSizeIterator<Item = Option<T::Native>>,
 >(
-    parent_id_col_iter: I,
-    parent_id_set: &IdBitmap,
+    update_parent_id_col: I,
     update_parent_id_set: &IdBitmap,
-) -> Vec<T::Native>
+    all_parent_id_set: &IdBitmap,
+) -> ScalarBuffer<T::Native>
 where
     u32: From<T::Native>,
 {
-    // TODO - validate that an invalid batch containing duplicate attr keys wouldn't
-    // cause a panic here
-    let mut upsert_attr_parent_ids = vec![T::Native::default(); parent_id_set.len() as usize];
+    let mut upsert_attr_parent_ids = vec![
+        T::Native::default();
+        update_parent_id_col.len()
+            + (all_parent_id_set.len() - update_parent_id_set.len())
+                as usize
+    ];
     let mut curr_idx = 0;
 
-    for id in parent_id_col_iter.flatten() {
+    // insert all the IDs to upsert first, which will be those from the existing parent_id column
+    for id in update_parent_id_col.flatten() {
         upsert_attr_parent_ids[curr_idx] = id;
         curr_idx += 1
     }
 
-    // TODO - look into like using binary op (parent_id and !update ?) to improve this perf?
-    for id in parent_id_set.iter() {
+    for id in all_parent_id_set.iter() {
         if update_parent_id_set.contains(id) {
             continue;
         }
 
-        // TODO safety comment
-        upsert_attr_parent_ids[curr_idx] =
-            T::Native::from_usize(id as usize).expect("value in range");
+        upsert_attr_parent_ids[curr_idx] = T::Native::usize_as(id as usize);
         curr_idx += 1;
     }
 
-    upsert_attr_parent_ids
+    ScalarBuffer::from(upsert_attr_parent_ids)
 }
 
 /// Decompose an AnyValue struct result into one [`AttributeUpsert`] per distinct value type.
@@ -1990,8 +2016,6 @@ fn decompose_any_value_upsert<'a, T: ArrowPrimitiveType>(
         };
 
         let new_type_match = eq(new_types, &UInt8Array::new_scalar(discriminant))?;
-
-        // TODO - we roundtrip to Arc w/ clone here annoyingly ...
 
         // 1. Build sub-mask: existing_key_mask AND existing_type == discriminant.
         let typed_existing_key_mask = merge(
