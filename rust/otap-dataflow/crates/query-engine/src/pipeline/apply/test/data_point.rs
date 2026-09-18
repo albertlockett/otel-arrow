@@ -3,7 +3,6 @@
 
 //! Tests for pipelines applied to metrics data points
 
-use datafusion::functions::expr_fn::pi;
 use otel_arrow_contrib_data_engine_kql_parser::Parser;
 use otel_arrow_dfe_pdata::{
     proto::{
@@ -1287,6 +1286,8 @@ async fn run_assign_to_all_data_point_type_test(
     }
 }
 
+/// Scenario: test creating a new attribute from a scalar value
+/// Guarantees: a new attribute can be created from a scalar value
 #[tokio::test]
 async fn test_assign_to_data_point_attributes() {
     let query = "metrics | apply data_points {
@@ -1303,10 +1304,12 @@ async fn test_assign_to_data_point_attributes() {
     .await;
 }
 
+/// Scenario: test replacing the value of an existing attribute
+/// Guarantees: the attribute value is replaced with the new value
 #[tokio::test]
 async fn test_data_point_replace_existing_attr_value() {
     let query = "metrics | apply data_points {
-        set attributes[\"x\"] = 5
+        set attributes[\"x\"] = 6
     }";
 
     run_assign_to_all_data_point_type_test(
@@ -1314,11 +1317,15 @@ async fn test_data_point_replace_existing_attr_value() {
         Default::default(),
         Some(vec![KeyValue::new("x", AnyValue::new_int(5))]),
         "x",
-        AnyValue::new_int(5),
+        AnyValue::new_int(6),
     )
     .await;
 }
 
+/// Scenario: creating a new attribute when the existing telemetry batch had no existing
+/// attributes. In this case, there is not an existing attribute record batch to update so the
+/// engine will need to synthesize a new one.
+/// Guarantees: the new attributes will be created.
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_no_existing_attrs() {
     let query = "metrics | apply data_points {
@@ -1335,6 +1342,8 @@ async fn test_assign_to_data_point_attributes_no_existing_attrs() {
     .await;
 }
 
+/// Scenario: assigning the value of an attribute from an existing attribute
+/// Guarantees: new attribute is created having the same value as the existing attribtue
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_copy_attribute() {
     let query = "metrics | apply data_points {
@@ -1351,6 +1360,10 @@ async fn test_assign_to_data_point_attributes_copy_attribute() {
     .await;
 }
 
+/// Scenario: assign a new attribute computed from a binary expression that must join two existing
+/// attributes on their parent_id column
+/// Guarantees: expression evaluates to produce the correct result and the result is assigned to
+/// the new attribute value
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_requiring_join_attrs() {
     let query = "metrics | apply data_points {
@@ -1370,6 +1383,10 @@ async fn test_assign_to_data_point_attributes_requiring_join_attrs() {
     .await;
 }
 
+/// Scenario: assign a new attribute computed from a binary expression that must join an existing
+/// attribute and a field from the data point record batch on left.parent_id = right.id columns
+/// Guarantees: expression evaluates to produce the correct result and the result is assigned to
+/// the new attribute value
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_requiring_join_attrs_and_record_right() {
     let query = "metrics | apply data_points {
@@ -1386,6 +1403,10 @@ async fn test_assign_to_data_point_attributes_requiring_join_attrs_and_record_ri
     .await;
 }
 
+/// Scenario: assign a new attribute computed from a binary expression that must join an existing
+/// attribute and a field from the data point record batch on left.id = right.parent_id columns
+/// Guarantees: expression evaluates to produce the correct result and the result is assigned to
+/// the new attribute value
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_requiring_join_attrs_and_record_left() {
     let query = "metrics | apply data_points {
@@ -1402,6 +1423,50 @@ async fn test_assign_to_data_point_attributes_requiring_join_attrs_and_record_le
     .await;
 }
 
+/// Scenario: assign a new attribute computed from a binary expression that must do a join of
+/// multiple scopes, in this case being scalar -> attributes.parent_id -> datapoint.id
+/// Guarantees: expression evaluates to produce the correct result and the result is assigned to
+/// the new attribute value
+#[tokio::test]
+async fn test_assign_to_data_point_attrs_requiring_multi_join_attrs_and_scalar_and_record_right() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = join(\".\", attributes[\"y\"], flags as String)
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        5,
+        Some(vec![KeyValue::new("y", AnyValue::new_string("b"))]),
+        "x",
+        AnyValue::new_string("b.5"),
+    )
+    .await;
+}
+
+/// Scenario: assign a new attribute computed from a binary expression that must do a join of
+/// multiple scopes, in this case being scalar -> datapoint.id -> attributes.parent_id
+/// Guarantees: expression evaluates to produce the correct result and the result is assigned to
+/// the new attribute value
+#[tokio::test]
+async fn test_assign_to_data_point_attrs_requiring_multi_join_attrs_and_scalar_and_record_left() {
+    let query = "metrics | apply data_points {
+        set attributes[\"x\"] = join(\".\", flags as String, attributes[\"y\"])
+    }";
+
+    run_assign_to_all_data_point_type_test(
+        query,
+        5,
+        Some(vec![KeyValue::new("y", AnyValue::new_string("b"))]),
+        "x",
+        AnyValue::new_string("5.b"),
+    )
+    .await;
+}
+
+/// Scenario: assign a new attribute computed from a binary expression that must do a join of
+/// multiple scopes, in this case being scalar -> attrs.parent_id -> attributes.parent_id
+/// Guarantees: expression evaluates to produce the correct result and the result is assigned to
+/// the new attribute value
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_requiring_multi_join_attrs_and_scalar() {
     let query = "metrics | apply data_points {
@@ -1421,38 +1486,8 @@ async fn test_assign_to_data_point_attributes_requiring_multi_join_attrs_and_sca
     .await;
 }
 
-#[tokio::test]
-async fn test_assign_to_data_point_attrs_requiring_multi_join_attrs_and_scalar_and_record_right() {
-    let query = "metrics | apply data_points {
-        set attributes[\"x\"] = join(\".\", attributes[\"y\"], flags as String)
-    }";
-
-    run_assign_to_all_data_point_type_test(
-        query,
-        5,
-        Some(vec![KeyValue::new("y", AnyValue::new_string("b"))]),
-        "x",
-        AnyValue::new_string("b.5"),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn test_assign_to_data_point_attrs_requiring_multi_join_attrs_and_scalar_and_record_left() {
-    let query = "metrics | apply data_points {
-        set attributes[\"x\"] = join(\".\", flags as String, attributes[\"y\"])
-    }";
-
-    run_assign_to_all_data_point_type_test(
-        query,
-        5,
-        Some(vec![KeyValue::new("y", AnyValue::new_string("b"))]),
-        "x",
-        AnyValue::new_string("5.b"),
-    )
-    .await;
-}
-
+/// Scenario: assign a new attribute computed from an expression that produces a boolean value
+/// Guarantees: The new boolean valued attribute is created
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_from_logical_binary_expr() {
     let query = "metrics | apply data_points {
@@ -1469,6 +1504,9 @@ async fn test_assign_to_data_point_attributes_from_logical_binary_expr() {
     .await;
 }
 
+/// Scenario: assign a new attribute computed from an expression that produces a boolean value
+/// using a join executed as a bitmap join of ID columns.
+/// Guarantees: The new boolean valued attribute is created
 #[tokio::test]
 async fn test_assign_to_data_point_attributes_requiring_bitmap_join_attrs() {
     let query = "metrics | apply data_points {
@@ -1490,14 +1528,11 @@ async fn test_assign_to_data_point_attributes_requiring_bitmap_join_attrs() {
 
 // Assign test cases to add:
 // - assign fields
-//   which I think will mean the rvalue scope is AttributesAll?
 
 /// Scenario: try to execute some queries that have valid syntax, but define operations that are
 /// not supported by this query engine (although most will be supported in future)
 /// Guarantees: that the operation returns an expected error instead of inadvertently evaluating
 /// and producing invalid results
-// TODO - uningnore this, but currently it is not passing
-#[ignore]
 #[tokio::test]
 async fn test_not_supported_queries_return_error() {
     struct TestCase {
@@ -1505,12 +1540,6 @@ async fn test_not_supported_queries_return_error() {
     }
 
     let test_cases = [
-        // filtering by attributes is not yet supported
-        TestCase {
-            query: "metrics | apply data_points {
-                where attributes[\"x\"] > 0
-            }",
-        },
         TestCase {
             query: "metrics | apply data_points {
                 where resource.attributes[\"x\"] > 0
@@ -1534,11 +1563,6 @@ async fn test_not_supported_queries_return_error() {
         TestCase {
             query: "metrics | apply data_points {
                 set flags = 0
-            }",
-        },
-        TestCase {
-            query: "metrics | apply data_points {
-                set attributes[\"x\"] = 5
             }",
         },
         // nested apply pipeline to modify data point attributes is not yet supported
@@ -1595,6 +1619,11 @@ async fn test_not_supported_queries_return_error() {
                 .pipeline;
         let mut pipeline = Pipeline::new(pipeline_expr);
         let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-        _ = pipeline.execute(input_batch).await.unwrap_err();
+        if let Ok(result) = pipeline.execute(input_batch).await {
+            panic!(
+                "unexpectedly did not produce error for query {:?}",
+                test_case.query
+            );
+        }
     }
 }

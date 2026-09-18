@@ -1521,29 +1521,21 @@ impl PipelineStage for AssignPipelineStage {
         &mut self,
         mut otap_batch: OtapArrowRecords,
         session_ctx: &SessionContext,
-        config_options: &ConfigOptions,
-        task_context: Arc<TaskContext>,
-        exec_state: &mut ExecutionState,
+        _config_options: &ConfigOptions,
+        _task_context: Arc<TaskContext>,
+        _exec_state: &mut ExecutionState,
     ) -> Result<OtapArrowRecords> {
         for data_point_type in MetricDataPointType::all() {
             let dp_payload_type = data_point_type.payload_type();
+            let Some(metrics_dp_rb) = otap_batch.get(dp_payload_type) else {
+                // nothing to do
+                continue;
+            };
 
             let eval_ctx = EvalContext::new_for_metrics_data_points(data_point_type, session_ctx);
 
-            // TODO - this is copied from Self::execute, we might want to consolidate the impls
-
             // if we're assigning to attributes, do it as a bulk attribute upsert for best performance
             if let ColumnAccessor::Attributes(attrs_id, _) = &self.dest_columns[0] {
-                // TODO - need to fill the parent_id column
-                // if matches!(attrs_id, AttributesIdentifier::Record(_)) {
-                //     self.fill_root_id_column_nulls(&mut otap_batch, exec_state)?;
-                // }
-
-                let Some(metrics_dp_rb) = otap_batch.get(dp_payload_type) else {
-                    // nothing to do
-                    continue;
-                };
-
                 let mut eval_results = Vec::new();
                 for source in &mut self.sources {
                     let eval_result = source.execute_as_value(&otap_batch, &eval_ctx)?;
@@ -1586,7 +1578,22 @@ impl PipelineStage for AssignPipelineStage {
                 continue;
             }
 
-            todo!("Other assignments");
+            // TODO support - add support for additional assignment targets for metric datapoints
+            return Err(match self.dest_columns[0] {
+                ColumnAccessor::ColumnName(_) | ColumnAccessor::StructCol(_, _) => {
+                    Error::NotYetSupportedError {
+                        message: "assigning metric datapoint columns not yet supported".into(),
+                    }
+                }
+                ColumnAccessor::NestedAttribute(_, _, _) => Error::NotYetSupportedError {
+                    message: "assigning to metric datapoint nested attributes not yet supported"
+                        .into(),
+                },
+                ColumnAccessor::Attributes(_, _) => {
+                    // safety: we've handled this in the block above
+                    unreachable!("already handled column accessor attributes")
+                }
+            });
         }
 
         Ok(otap_batch)
