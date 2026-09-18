@@ -848,7 +848,7 @@ async fn run_filter_all_data_point_types_test(
     let mut exp_hist_dps = Vec::new();
     let mut summary_dps = Vec::new();
 
-    for (flag, attrs) in flags_and_attrs.clone().into_iter() {
+    for (flag, attrs) in flags_and_attrs.clone() {
         number_dps.push(
             NumberDataPoint::build()
                 .flags(flag)
@@ -971,7 +971,8 @@ async fn run_filter_all_data_point_types_test(
     assert_metrics_eq(metrics_result, to_metrics_data(expected))
 }
 
-// TODO -- the inversion of this
+/// Scenario: Filter metric data points having an attribute value equal to some scalar
+/// Guarantees: the engine can filter metric data points by this type of predicate
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_value() {
     let query = "metrics | apply data_points {
@@ -1006,6 +1007,9 @@ async fn test_filter_data_point_by_attribute_value() {
     .await
 }
 
+/// Scenario: Filter metric data points by a predicate that will involve a bitmap join for the
+/// two binary expressions AND'd together
+/// Guarantees: the engine can filter metric data points by this type of predicate
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_and() {
     let query = "metrics | apply data_points {
@@ -1045,6 +1049,9 @@ async fn test_filter_data_point_by_attribute_and() {
     .await;
 }
 
+/// Scenario: Filter metric data points by a predicate that will involve a bitmap join for the
+/// two binary expressions OR'd together
+/// Guarantees: the engine can filter metric data points by this type of predicate
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_or() {
     let query = "metrics | apply data_points {
@@ -1083,6 +1090,9 @@ async fn test_filter_data_point_by_attribute_or() {
     .await;
 }
 
+/// Scenario: Filter metric data points by a predicate that will involve an ID bitmap inversion
+/// for the NOT expression
+/// Guarantees: the engine can filter metric data points by this type of predicate
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_logical_binary_inverted() {
     let query = "metrics | apply data_points {
@@ -1122,6 +1132,9 @@ async fn test_filter_data_point_by_attribute_logical_binary_inverted() {
     .await;
 }
 
+/// Scenario: Filter metric data points by a predicate that will check if the metric datapoint
+/// does not have some attribute value
+/// Guarantees: the engine can filter metric data points by this type of predicate
 #[tokio::test]
 async fn test_filter_data_point_by_attribute_is_null() {
     let query = "metrics | apply data_points {
@@ -1526,9 +1539,6 @@ async fn test_assign_to_data_point_attributes_requiring_bitmap_join_attrs() {
     .await;
 }
 
-// Assign test cases to add:
-// - assign fields
-
 /// Scenario: try to execute some queries that have valid syntax, but define operations that are
 /// not supported by this query engine (although most will be supported in future)
 /// Guarantees: that the operation returns an expected error instead of inadvertently evaluating
@@ -1619,7 +1629,7 @@ async fn test_not_supported_queries_return_error() {
                 .pipeline;
         let mut pipeline = Pipeline::new(pipeline_expr);
         let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
-        if let Ok(result) = pipeline.execute(input_batch).await {
+        if pipeline.execute(input_batch).await.is_ok() {
             panic!(
                 "unexpectedly did not produce error for query {:?}",
                 test_case.query

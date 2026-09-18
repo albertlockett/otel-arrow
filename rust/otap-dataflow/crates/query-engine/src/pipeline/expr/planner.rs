@@ -2053,7 +2053,7 @@ impl ScopedExpr {
 
                 if *align_children_to_record {
                     let record_scope = match record_type {
-                        RecordType::Child(child_kind) => RecordScope::Child(child_kind.clone()),
+                        RecordType::Child(child) => RecordScope::Child(*child),
                         _ => RecordScope::Signal,
                     };
                     return Ok(Cow::Owned(DataScope::Record(record_scope)));

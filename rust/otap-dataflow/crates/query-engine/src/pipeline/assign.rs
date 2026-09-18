@@ -927,10 +927,6 @@ impl AssignPipelineStage {
         Ok(otap_batch)
     }
 
-    // fn build_upsert_input<T: ArrowPrimitiveType>(
-    //     update_parent_id_set: &IdBitmap,
-    // )
-
     /// Fills in any nulls in the root batch's ID column with newly assigned IDs.
     ///
     /// when we are setting attributes, we must ensure that the record to which the attribute is

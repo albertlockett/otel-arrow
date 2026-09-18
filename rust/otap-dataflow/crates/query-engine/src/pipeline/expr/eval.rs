@@ -145,27 +145,12 @@ impl ScopedExpr {
             Self::Eval {
                 eval:
                     LeafEval::DatafusionExpr {
-                        projection,
-                        projection_opts,
                         logical_expr,
                         physical_expr,
-                        missing_data_passes,
                         ..
                     },
                 ..
-            } => {
-                // TODO pretty sure this can just be deleted
-                // // TODO - do we need some tests for this stuff?
-                // let Some(projected_batch) = projection.project_with_options(record_batch, projection_opts)? else {
-                //     return Ok(ColumnarValue::Scalar(if *missing_data_passes {
-                //         ScalarValue::Boolean(Some(true))
-                //     } else {
-                //         ScalarValue::Null
-                //     }))
-                // };
-                // evaluate_df_expr(logical_expr, physical_expr, eval_ctx, &projected_batch)
-                evaluate_df_expr(logical_expr, physical_expr, eval_ctx, &record_batch)
-            }
+            } => evaluate_df_expr(logical_expr, physical_expr, eval_ctx, &record_batch),
             _ => Err(Error::InvalidPipelineError {
                 cause: "only Eval(DatafusionExpr) can be evaluated on a provided batch".into(),
                 query_location: None,

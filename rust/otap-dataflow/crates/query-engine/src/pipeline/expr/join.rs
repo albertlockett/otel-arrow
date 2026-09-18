@@ -969,8 +969,12 @@ impl JoinExec for RootToAttributesJoin {
             DataScope::Record(RecordScope::Child(_))
         );
         if is_u32_ids {
-            let right_lookup =
-                U32IdJoinLookup::try_new_from_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
+            let right_lookup = U32IdJoinLookup::try_new_from_array(
+                right
+                    .parent_ids
+                    .as_ref()
+                    .ok_or_else(|| missing_column_err(consts::PARENT_ID))?,
+            )?;
             try_build_simple_join_ids(left.ids.as_ref(), consts::ID, &right_lookup)
         } else {
             // build the lookup for the right side of the join by parent ID
@@ -1041,8 +1045,12 @@ impl JoinExec for RootAttrsToRootJoin {
         // TODO - the u16 path should proceed the same way as the u32 path
         if is_u32_ids {
             // TODO - it's a bit messy to have to call UInt32Type for this considering the ID lookup type is already U32
-            let right_lookup =
-                U32IdJoinLookup::try_new_from_array(right.ids.as_ref(), consts::PARENT_ID)?;
+            let right_lookup = U32IdJoinLookup::try_new_from_array(
+                right
+                    .ids
+                    .as_ref()
+                    .ok_or_else(|| missing_column_err(consts::PARENT_ID))?,
+            )?;
             try_build_simple_join_ids(left.parent_ids.as_ref(), consts::PARENT_ID, &right_lookup)
         } else {
             // build the lookup for the right side of the join by ID column
@@ -1243,8 +1251,12 @@ impl JoinExec for AttributeToSameAttributeJoin {
         // TODO - the u16 path should proceed the same way as the u32 path
         if is_u32_ids {
             // TODO - it's a bit messy to have to call UInt32Type for this considering the ID lookup type is already U32
-            let right_lookup =
-                U32IdJoinLookup::try_new_from_array(right.parent_ids.as_ref(), consts::PARENT_ID)?;
+            let right_lookup = U32IdJoinLookup::try_new_from_array(
+                right
+                    .parent_ids
+                    .as_ref()
+                    .ok_or_else(|| missing_column_err(consts::PARENT_ID))?,
+            )?;
             try_build_simple_join_ids(left.parent_ids.as_ref(), consts::PARENT_ID, &right_lookup)
         } else {
             // build a mapping of right-side parent_ids to right-side indices
@@ -1644,35 +1656,25 @@ impl JoinExec for AttributesAllSelectionVecJoin {
 
 /// Lookup structure for joining two record batches by ID.
 ///
-/// The intention is for this to be a fast lookup of ID -> row.
+/// Provides O(1) inserts and lookups for mapping ID -> row index, using a paged vector
+/// structure that avoids allocating the entire ID range.
 ///
-/// The idea here is that we have something like a vector that can be indexed by the ID, however we
-/// don't allocate the entire vector. Instead we have allocate it in pages only when there is an ID
-/// in some given range.
+/// Instead of a flat vector indexed by ID (which would be wasteful for large ID types)
+/// or a HashMap (which has hashing overhead), IDs are split into a page index and a
+/// page offset using bit shifting. Pages are allocated on demand, so only the parts of
+/// the ID space that are actually used consume memory.
 ///
-/// This structure provides O(1) inserts and lookups while being memory-efficient for dense ID
-/// ranges, while still attempting to avoid allocating a lookup table for the entire ID range if
-/// the entire range isn't used.
+/// In practice, IDs are typically dense starting from 0 (since they're relative to a
+/// batch), so most lookups hit the first few pages. This gives us good cache locality
+/// and minimal allocations.
 ///
-/// The u16 space (0-65535) is divided into 64 pages of 1024 entries each.
+/// Page sizes were chosen based on benchmarking insert performance across different
+/// batch sizes (128, 1024, 8096), comparing against HashMap:
+/// - u16: PAGE_BITS=8, 256-entry pages (~2KB each), 256 possible pages
+/// - u32: PAGE_BITS=10, 1024-entry pages (~8KB each), ~4M possible pages
 ///
-/// # Memory Layout
-/// - Outer array: 64 entries (top 6 bits of u16)
-/// - Each page: 1024 entries (bottom 10 bits of u16)
-/// - Each page is ~8KB (Option<usize> is 8 bytes on 64-bit systems)
-///
-/// # Example
-/// For ID 5120 (binary: 00010100_00000000):
-/// - Outer index: 5120 >> 10 = 5
-/// - Inner index: 5120 & 0x3FF = 0
-///
-// TODO - benchmark performance against HashMap... HashMap could have been used for this as well
-// however, this might be slightly faster because we don't need to hash the IDs for every insert
-// and lookup. Also, if the join sides are mostly sorted by the ID columns, we'll get good page
-// CPU locality as we scan over the IDs.
-//
-// TODO - comment needs updated cause now this is supported
-// TODO - eventually this will need to support u32 IDs
+/// Smaller pages keep each allocation L1-cache-friendly, which matters more than
+/// minimizing the number of allocations.
 struct IdJoinLookup<T: IdJoinLookupType, const PAGE_SIZE: usize> {
     pages: Vec<Option<Box<[Option<usize>; PAGE_SIZE]>>>,
     _phantom: PhantomData<T>,
@@ -1685,32 +1687,30 @@ type U16IdJoinLookup = IdJoinLookup<u16, U16_ID_LOOKUP_PAGE_SIZE>;
 type U32IdJoinLookup = IdJoinLookup<u32, U32_ID_LOOKUP_PAGE_SIZE>;
 
 impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
-    // TODO comments
-    fn try_new_from_array(ids_arr: Option<&ArrayRef>, column_name: &str) -> Result<Self> {
-        let array = ids_arr.ok_or_else(|| missing_column_err(column_name))?;
-
-        if let Some(ids_as_primitive) = array.as_primitive_opt::<T::ArrowType>() {
-            Ok(Self::new_from_primitive(ids_as_primitive))
-        } else if let Some(ids_as_dict) = array.as_dictionary_opt::<UInt8Type>() {
+    /// Create a new instance from an ID column.
+    ///
+    /// Returns an error if the ID column is not either `PrimitiveArray<T>` or  `Dict<u8|u16, T>`
+    /// as these are the expected types for ID columns in OTAP. This also returns an error that
+    /// the column is missing if id_arr is `None`
+    fn try_new_from_array(ids_arr: &ArrayRef) -> Result<Self> {
+        if let Some(ids_as_primitive) = ids_arr.as_primitive_opt::<T::ArrowType>() {
+            return Ok(Self::new_from_primitive(ids_as_primitive))
+        } else if let Some(ids_as_dict) = ids_arr.as_dictionary_opt::<UInt8Type>() {
             if let Some(typed_dict) = ids_as_dict.downcast_dict::<PrimitiveArray<T::ArrowType>>() {
-                return Ok(Self::new_from_iter(typed_dict.into_iter()));
-            } else {
-                todo!("bad dict vals")
+                return Ok(Self::new_from_iter(typed_dict.into_iter()))
             }
-        } else if let Some(ids_as_dict) = array.as_dictionary_opt::<UInt16Type>() {
+        } else if let Some(ids_as_dict) = ids_arr.as_dictionary_opt::<UInt16Type>() {
             if let Some(typed_dict) = ids_as_dict.downcast_dict::<PrimitiveArray<T::ArrowType>>() {
-                Ok(Self::new_from_iter(typed_dict.into_iter()))
-            } else {
-                todo!("bad dict vals")
+                return Ok(Self::new_from_iter(typed_dict.into_iter()))
             }
-        } else {
-            todo!("bad type")
         }
 
-        // match array.da
+        Err(otel_arrow_dfe_pdata::error::Error::InvalidIdColumnType {
+            data_type: ids_arr.data_type().clone()
+        }.into())
     }
 
-    /// Creates a new IdJoin from a UInt16Array of parent IDs.
+    /// Creates a new IdJoin from a PrimitiveArray of parent IDs.
     ///
     /// # Arguments
     /// * `parent_ids` - The parent_id array from the right side of the join
@@ -1721,10 +1721,15 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
         Self::new_from_iter::<_>(ids.iter())
     }
 
-    // TODO - commentary
+    /// Create a new instance populating non-null IDs from the iter
     fn new_from_iter<I: Iterator<Item = Option<<T::ArrowType as ArrowPrimitiveType>::Native>>>(
         ids_array_iter: I,
     ) -> Self {
+        // This const assertion is here to ensure that it is a compiler error if this generic
+        // type is constructed using PAGE_SIZE that is different than the page size expected
+        // by the ID mask helper, which could cause certain lookups to panic.
+        const { assert!(PAGE_SIZE == T::PAGE_SIZE) };
+
         let mut pages = Vec::new();
         for (row_idx, value) in ids_array_iter.enumerate() {
             let Some(value) = value else { continue };
@@ -1762,9 +1767,10 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
     /// * `Some(row_idx)` - The row index in the right batch if a match exists
     /// * `None` - No matching parent_id found
     #[inline]
-    fn lookup(&self, left_id: T) -> Option<usize> {
-        // TODO - comment on why this is here.
+    pub fn lookup(&self, left_id: T) -> Option<usize> {
+        // see comment in Self::new_from_iter about the purpose of this const assertion.
         const { assert!(PAGE_SIZE == T::PAGE_SIZE) };
+
         let page_idx = left_id.as_usize() >> T::PAGE_BITS;
         let page_offset = left_id.as_usize() & T::PAGE_MASK;
 
@@ -1773,8 +1779,8 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
             .and_then(|page| page.as_ref().and_then(|page| page[page_offset]))
     }
 }
-
 // Helper trait for defining the size of various structures in the IdJoinLookup paged vec.
+#[allow(missing_docs)]
 trait IdJoinLookupType:
     Copy
     + std::ops::Shr<Output = Self>
@@ -1791,7 +1797,7 @@ trait IdJoinLookupType:
 }
 
 impl IdJoinLookupType for u16 {
-    const PAGE_BITS: usize = 10;
+    const PAGE_BITS: usize = 8;
     type ArrowType = UInt16Type;
 
     #[inline]
@@ -1801,12 +1807,53 @@ impl IdJoinLookupType for u16 {
 }
 
 impl IdJoinLookupType for u32 {
-    const PAGE_BITS: usize = 14;
+    const PAGE_BITS: usize = 10;
     type ArrowType = UInt32Type;
 
     #[inline]
     fn as_usize(self) -> usize {
         self as usize
+    }
+}
+
+/// Support utilities for benchmarks
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench_support {
+    use arrow::array::UInt32Array;
+
+    use super::*;
+
+    pub struct U16IdLookupBenchWrapper {
+        inner: U16IdJoinLookup,
+    }
+
+    impl U16IdLookupBenchWrapper {
+        pub fn new(data: &UInt16Array) -> Self {
+            Self {
+                inner: U16IdJoinLookup::new_from_primitive(data),
+            }
+        }
+
+        pub fn lookup(&self, id: u16) -> Option<usize> {
+            self.inner.lookup(id)
+        }
+    }
+
+    pub struct U32IdLookupBenchWrapper {
+        inner: U32IdJoinLookup,
+    }
+
+    impl U32IdLookupBenchWrapper {
+        pub fn new(data: &UInt32Array) -> Self {
+            Self {
+                inner: U32IdJoinLookup::new_from_primitive(data),
+            }
+        }
+
+        pub fn lookup(&self, id: u32) -> Option<usize> {
+            self.inner.lookup(id)
+        }
     }
 }
 

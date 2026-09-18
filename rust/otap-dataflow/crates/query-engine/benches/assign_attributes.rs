@@ -118,6 +118,23 @@ fn bench_assign_attribute_pipelines(c: &mut Criterion) {
             attributes["new_key2"] = "val2"
         "#,
     );
+
+    // TODO - delete this
+    bench_log_pipeline(
+        c,
+        &rt,
+        &batch_sizes,
+        "root_from_attr",
+        r#"logs | extend event_name = attributes["code.namespace"]"#,
+    );
+
+    bench_log_pipeline(
+        c,
+        &rt,
+        &batch_sizes,
+        "attr_from_root",
+        r#"logs | extend attributes["code.namespace"] = event_name"#,
+    );
 }
 
 #[allow(missing_docs)]
