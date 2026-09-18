@@ -189,50 +189,71 @@ impl IdBitmap {
         }
     }
 
-    /// TODO comment on what this is doing
+    /// Try to populate this bitmap from an ID/parent ID column from an OTAP batch.
+    ///
+    /// This expects that the type of the ID column is one of the known types used for id column
+    /// or parent_id columns in the OTAP spec, which includes arrays of type `u16`, `u32`, and
+    /// `Dict<u8/u16, u32>`. If the passed `id_column` argument is not one of these types, this
+    /// method will return an error.
+    ///
+    /// This method has the same behaviour as `[Self::populate]` with respect to clearing the
+    /// bitmap / reusing existing allocations.
     pub fn try_populate_from_id_column(&mut self, id_column: &ArrayRef) -> Result<()> {
         match id_column.data_type() {
             DataType::UInt16 => {
-                self.populate(
-                    id_column
-                        .as_primitive::<UInt16Type>()
-                        .iter()
-                        .flatten()
-                        .map(|i| i as u32),
-                );
-                Ok(())
+                let id_column = id_column.as_primitive::<UInt16Type>();
+                if id_column.nulls().is_some() {
+                    self.populate(id_column.iter().flatten().map(|i| i as u32));
+                } else {
+                    self.populate(id_column.values().iter().map(|i| *i as u32));
+                }
             }
             DataType::UInt32 => {
-                self.populate(id_column.as_primitive::<UInt32Type>().iter().flatten());
-                Ok(())
+                let id_column = id_column.as_primitive::<UInt32Type>();
+                if id_column.nulls().is_some() {
+                    self.populate(id_column.iter().flatten());
+                } else {
+                    self.populate(id_column.values().iter().copied());
+                }
             }
             DataType::Dictionary(k, _) => match k.as_ref() {
                 DataType::UInt8 => {
                     let dict_arr = id_column.as_dictionary::<UInt8Type>();
                     if let Some(typed_dict) = dict_arr.downcast_dict::<UInt32Array>() {
                         self.populate(typed_dict.into_iter().flatten());
-                        Ok(())
                     } else {
-                        todo!("invalid dict keys")
+                        return Err(Error::UnsupportedDictionaryValueType {
+                            expect_oneof: vec![DataType::UInt32],
+                            actual: dict_arr.value_type(),
+                        });
                     }
                 }
                 DataType::UInt16 => {
                     let dict_arr = id_column.as_dictionary::<UInt16Type>();
                     if let Some(typed_dict) = dict_arr.downcast_dict::<UInt32Array>() {
                         self.populate(typed_dict.into_iter().flatten());
-                        Ok(())
                     } else {
-                        todo!("invalid dict keys")
+                        return Err(Error::UnsupportedDictionaryValueType {
+                            expect_oneof: vec![DataType::UInt32],
+                            actual: dict_arr.value_type(),
+                        });
                     }
                 }
-                _ => {
-                    todo!("invalid dict type")
+                other => {
+                    return Err(Error::UnsupportedDictionaryKeyType {
+                        expect_oneof: vec![DataType::UInt8, DataType::UInt16],
+                        actual: other.clone(),
+                    });
                 }
             },
-            _ => {
-                todo!("invalid ID column type")
+            other => {
+                return Err(Error::InvalidIdColumnType {
+                    data_type: other.clone(),
+                });
             }
         }
+
+        Ok(())
     }
 
     /// In-place union: `self |= other`.

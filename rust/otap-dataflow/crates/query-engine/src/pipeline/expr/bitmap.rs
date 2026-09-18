@@ -230,17 +230,9 @@ fn scoped_value_to_id_mask(
                 if matches!(sv.scope, DataScope::Attribute(_, _))
                     && let Some(parent_ids) = &sv.parent_ids
                 {
-                    let parent_id_col = parent_ids
-                        .as_any()
-                        .downcast_ref::<UInt16Array>()
-                        .ok_or_else(|| Error::ExecutionError {
-                            cause: format!(
-                                "expected parent_id to be UInt16, found {:?}",
-                                parent_ids.data_type()
-                            ),
-                        })?;
                     let mut bitmap = pool.acquire();
-                    bitmap.populate(parent_id_col.values().iter().map(|pid| *pid as u32));
+                    bitmap.try_populate_from_id_column(parent_ids)?;
+
                     return Ok(IdMask::Some(bitmap));
                 }
                 Ok(IdMask::All)

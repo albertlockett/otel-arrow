@@ -1123,6 +1123,45 @@ async fn test_filter_data_point_by_attribute_logical_binary_inverted() {
     .await;
 }
 
+#[tokio::test]
+async fn test_filter_data_point_by_attribute_is_null() {
+    let query = "metrics | apply data_points {
+        where attributes[\"x\"] == null
+    }";
+
+    run_filter_all_data_point_types_test(
+        query,
+        vec![
+            (
+                2u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(6)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                1u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("x", AnyValue::new_int(5)),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (
+                3u32,
+                Some(vec![
+                    KeyValue::new("a", AnyValue::new_string("b")),
+                    KeyValue::new("y", AnyValue::new_int(6)),
+                ]),
+            ),
+            (4u32, None),
+        ],
+        vec![2, 3],
+    )
+    .await;
+}
+
 /// In a handful of tests below, we want to ensure that values are assigned to all data point types
 /// with the correct key / value from sources involving various types of expressions. This helper
 /// simply populates each type of datapoint, evaluates the expression, and ensures the correct
