@@ -36,6 +36,8 @@ mod tests {
     use crate::encode::{
         encode_logs_otap_batch, encode_metrics_otap_batch, encode_spans_otap_batch,
     };
+    use crate::proto::OtlpProtoMessage;
+    use crate::proto::opentelemetry::arrow::v1::ArrowPayloadType;
     use crate::proto::opentelemetry::common::v1::{
         AnyValue, ArrayValue, KeyValue, KeyValueList, any_value,
     };
@@ -49,6 +51,8 @@ mod tests {
     use crate::proto::opentelemetry::trace::v1::{
         ResourceSpans, ScopeSpans, Span, TracesData, span,
     };
+    use crate::schema::consts;
+    use crate::testing::round_trip::{otlp_to_otap, to_logs_data};
     use crate::views::otap::{OtapLogsView, OtapMetricsView, OtapTracesView};
     use crate::views::otlp::bytes::logs::RawLogsData;
     use crate::views::otlp::bytes::metrics::RawMetricsData;
@@ -168,6 +172,69 @@ mod tests {
     fn reports_writer_failures() {
         let error = write_logs_json(&LogsData::default(), &mut FailingWriter).unwrap_err();
         assert!(error.to_string().contains("injected writer failure"));
+    }
+
+    /// Scenario: encode as JSON from OTAP data missing the optional attributes columns (due to
+    /// their being all default values) encoded correctly as default values
+    /// Guarantees: the values are encoded as default values
+    #[test]
+    fn test_empty_attrs_encoded_correctly_from_otap_view() {
+        let request = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("str", AnyValue::new_string("")),
+                    KeyValue::new("int", AnyValue::new_int(0)),
+                    KeyValue::new("double", AnyValue::new_double(0)),
+                    KeyValue::new("bool", AnyValue::new_bool(false)),
+                    KeyValue::new("bytes", AnyValue::new_bytes(b"")),
+                ])
+                .finish(),
+        ]);
+        let as_otap = otlp_to_otap(&OtlpProtoMessage::Logs(request));
+        let log_attrs = as_otap.get(ArrowPayloadType::LogAttrs).unwrap();
+        assert!(log_attrs.column_by_name(consts::ATTRIBUTE_STR).is_none());
+        assert!(log_attrs.column_by_name(consts::ATTRIBUTE_INT).is_none());
+        assert!(log_attrs.column_by_name(consts::ATTRIBUTE_DOUBLE).is_none());
+        // Like I said in the other comment, I think this bool column is always present?
+        // assert!(log_attrs.column_by_name(consts::ATTRIBUTE_BOOL).is_none());
+        let view = OtapLogsView::try_from(&as_otap).unwrap();
+        let mut output = Vec::new();
+        write_logs_json(&view, &mut output).unwrap();
+        assert_eq!(
+            decoded_document(&output),
+            json!({
+                "resourceLogs": [{
+                    "resource": {},
+                    "scopeLogs": [{
+                        "scope": {},
+                        "logRecords": [{
+                            "attributes": [
+                                {
+                                    "key": "str",
+                                    "value": { "stringValue": "" }
+                                },
+                                {
+                                    "key": "int",
+                                    "value": { "intValue": 0 }
+                                },
+                                {
+                                    "key": "double",
+                                    "value": { "doubleValue": 0 }
+                                },
+                                {
+                                    "key": "bool",
+                                    "value": { "boolValue": 0 }
+                                },
+                                {
+                                    "key": "bytesValue",
+                                    "value": { "bytesValue": [] }
+                                }
+                            ]
+                        }]
+                    }]
+                }]
+            })
+        );
     }
 
     /// Scenario: A protobuf logs batch contains timestamps, severity, a body, and trace context.
