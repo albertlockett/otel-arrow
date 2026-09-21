@@ -175,3 +175,95 @@ impl Sizer {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+
+    #[test]
+    fn test_example() {
+        use crate::proto::{
+            OtlpProtoMessage,
+            opentelemetry::{arrow::v1::*, common::v1::*, logs::v1::*, resource::v1::*}
+        };
+        use crate::schema::consts::*;
+        use crate::testing::round_trip::otlp_to_otap;
+
+        let logs_data = LogsData {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(
+                    Resource::build()
+                        .attributes(vec![KeyValue::new("x", AnyValue::new_string("y"))])
+                        .finish(),
+                ),
+                schema_url: "schema.url.com".into(),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(
+                        InstrumentationScope::build()
+                            .name("scope1")
+                            .attributes(vec![KeyValue::new("x", AnyValue::new_string("y"))])
+                            .finish(),
+                    ),
+                    schema_url: "schema.url.com".into(),
+                    log_records: vec![LogRecord::build().finish()],
+                }],
+            }],
+        };
+
+        let mut otap = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
+        
+        // not transport optimized by default
+        let logs_rb = otap.get(ArrowPayloadType::Logs).unwrap();
+        let resource_col = logs_rb.column_by_name(RESOURCE).unwrap();
+        println!("resource_col_dt = {:#?}", resource_col.data_type());
+        /* prints:
+        resource_col_dt = Struct(
+            [
+                Field {
+                    name: "id",
+                    data_type: UInt16,
+                    nullable: true,
+                    metadata: {
+                        "encoding": "plain",
+                    },
+                },
+                Field {
+                    name: "schema_url",
+                    data_type: Dictionary(
+                        UInt8,
+                        Utf8,
+                    ),
+                    nullable: true,
+                },
+            ],
+        )
+        */
+
+        // transport optimized
+        otap.encode_transport_optimized().unwrap();
+         let logs_rb = otap.get(ArrowPayloadType::Logs).unwrap();
+        let resource_col = logs_rb.column_by_name(RESOURCE).unwrap();
+        println!("resource_col_dt = {:#?}", resource_col.data_type());        
+        /* prints:
+        resource_col_dt = Struct(
+            [
+                Field {
+                    name: "id",
+                    data_type: UInt16,
+                    nullable: true,
+                    metadata: {
+                        "encoding": "delta",
+                    },
+                },
+                Field {
+                    name: "schema_url",
+                    data_type: Dictionary(
+                        UInt8,
+                        Utf8,
+                    ),
+                    nullable: true,
+                },
+            ],
+        )
+        */
+    }
+}
