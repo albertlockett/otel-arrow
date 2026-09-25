@@ -1293,95 +1293,10 @@ impl PipelineStage for AssignPipelineStage {
         let all_rows_same_attr_type =
             neq(type_column, &UInt8Array::new_scalar(input_attr_type as u8))?.true_count() == 0;
 
-        // // create the record batch that will be the input to the datafusion physical expression..
-        // // if the expression involves the attribute value (e.g. `value + 2`), we produce a record
-        // // batch with a single column which is the "value", otherwise, the input is an empty record
-        // // batch. We do this because we are currently assuming the only types of expressions we
-        // // support are those involving the attribute values (referenced as the virtual "value")
-        // // column, or expressions involving static constants which don't need input columns.
-        // let projected_rb = if self.projection_contains_value_column {
-        //     if !all_rows_same_attr_type {
-        //         // if not all the attribute types are the same, we can't determine a single value
-        //         // column to use in the projection, so return an error. In practice, the batch
-        //         // should be split apart before this pipeline stage using other operators to ensure
-        //         // we only have one value type.
-        //         return Err(Error::ExecutionError {
-        //             cause: "All input rows for attribute assignment must have the same type \
-        //                 if value used in expression"
-        //                 .into(),
-        //         });
-        //     }
-
-        //     // try to access the values column
-        //     let values_column_name = match input_attr_type {
-        //         AttributeValueType::Bool => Some(consts::ATTRIBUTE_BOOL),
-        //         AttributeValueType::Double => Some(consts::ATTRIBUTE_DOUBLE),
-        //         AttributeValueType::Int => Some(consts::ATTRIBUTE_INT),
-        //         AttributeValueType::Str => Some(consts::ATTRIBUTE_STR),
-        //         AttributeValueType::Empty => None,
-        //         other => {
-        //             return Err(Error::NotYetSupportedError {
-        //                 message: format!(
-        //                     "Setting attributes of type {:?} in nested pipeline not yet supported",
-        //                     other
-        //                 ),
-        //             });
-        //         }
-        //     };
-
-        //     let values_column =
-        //         values_column_name.and_then(|col| attrs_record_batch.column_by_name(col));
-
-        //     let values_column: ArrayRef = match values_column {
-        //         Some(col) => Arc::clone(col),
-        //         None => {
-        //             // here the values column is missing, which basically means the attributes
-        //             // were all null. We'll create an all null array as a placeholder column.
-        //             let len = attrs_record_batch.num_rows();
-        //             match input_attr_type {
-        //                 AttributeValueType::Bool => Arc::new(BooleanArray::new_null(len)),
-        //                 AttributeValueType::Double => Arc::new(Float64Array::new_null(len)),
-        //                 AttributeValueType::Int => Arc::new(Int64Array::new_null(len)),
-        //                 AttributeValueType::Str => Arc::new(StringArray::new_null(len)),
-        //                 AttributeValueType::Empty => Arc::new(NullArray::new(len)),
-        //                 other => {
-        //                     return Err(Error::NotYetSupportedError {
-        //                         message: format!(
-        //                             "Setting attributes of type {:?} in nested pipeline not yet supported",
-        //                             other
-        //                         ),
-        //                     });
-        //                 }
-        //             }
-        //         }
-        //     };
-
-        //     // create the input record batch
-        //     let mut fields = vec![Arc::new(Field::new(
-        //         VALUE_COLUMN_NAME,
-        //         values_column.data_type().clone(),
-        //         true,
-        //     ))];
-        //     let mut columns = vec![values_column];
-
-        //     // remove dict encoding if necessary. This would be needed for certain expressions such
-        //     // as arithmetic
-        //     if leaf_requires_dict_downcast(&self.sources[0]) {
-        //         Projection::try_downcast_dicts(&mut fields, &mut columns)?
-        //     }
-
-        //     Cow::Owned(RecordBatch::try_new(
-        //         Arc::new(Schema::new(fields)),
-        //         columns,
-        //     )?)
-        // } else {
-        //     Cow::Borrowed(&attrs_record_batch)
-        // };
 
         // evaluate the expression
         let mut result = self.sources[0]
             .evaluate_on_attrs_batch(&attrs_record_batch, &EvalContext::new(session_context))?
-            // .evaluate_on_attrs_batch(&projected_rb, &EvalContext::new(session_context))?
             .to_array(attrs_record_batch.num_rows())?;
 
         // determine the "logical" type of the result (e.g. the array type, or the values if the

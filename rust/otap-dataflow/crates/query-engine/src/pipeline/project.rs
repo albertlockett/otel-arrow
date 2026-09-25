@@ -160,11 +160,9 @@ impl Projection {
                 ProjectedSchemaColumn::Root(desired_col_name) => {
                     if let Some((index, _)) = projection_cols.find(desired_col_name) {
                         columns_to_keep |= 1 << index;
-                        println!("here col found {desired_col_name:?} -- {columns_to_keep:?}");
                     } else if default_nulls {
                         // default nulls
                         columns_to_keep |= 1 << projection_cols.fields.len();
-                        println!("here col not found {desired_col_name:?} -- {columns_to_keep:?}");
                         projection_cols.append_column(
                             Field::new(desired_col_name, DataType::Null, true),
                             Arc::new(NullArray::new(projection_cols.num_rows())),
@@ -174,7 +172,6 @@ impl Projection {
                     };
                 }
                 ProjectedSchemaColumn::Struct(desired_struct_name, desired_struct_fields) => {
-                    println!("Why am I here?");
                     let struct_index = projection_cols.find(desired_struct_name).map(|(i, _)| i);
                     if struct_index.is_none() && !default_nulls {
                         return false;
@@ -247,11 +244,6 @@ impl Projection {
                 }
             }
         }
-
-        println!("self.schema = {:#?}", self.schema);
-        println!("columns to keep {columns_to_keep:0b}");
-        println!("schema = {:#?}", projection_cols.fields);
-        println!("----");
 
         let mut index = 0;
         projection_cols.columns.retain(|_| {
