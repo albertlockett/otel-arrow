@@ -122,6 +122,7 @@ fn try_project_attrs_record_batch(
         });
     }
 
+    // TODO -- we actually haven't checked this I don't think now that we've refactored things.
     // safety: we've already checked the batch is not empty, and that there aren't any nulls
     // in this column, which means we should be safe to expect at least one non-null type
     let input_attr_type = type_column
