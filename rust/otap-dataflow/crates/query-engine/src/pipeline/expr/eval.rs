@@ -50,8 +50,6 @@ use crate::pipeline::project::anyval::{
 use crate::pipeline::project::{Projection, ProjectionOptions};
 use otel_arrow_dfe_pdata::otap::filter::IdBitmapPool;
 
-mod batch;
-
 /// Context for evaluating [`ScopedExpr`]
 pub(crate) struct EvalContext<'a> {
     /// When evaluating a [`ScopedExpr`] and encountering a data scope identifying the source
@@ -142,8 +140,30 @@ impl ScopedExpr {
         eval_ctx: &EvalContext<'_>,
     ) -> Result<ColumnarValue> {
         match self {
-            Self::Eval { eval, .. } => {
-                batch::evaluate_on_attrs_batch(attrs_record_batch, eval, eval_ctx)
+            Self::Eval {
+                eval:
+                    LeafEval::DatafusionExpr {
+                        logical_expr,
+                        physical_expr,
+                        projection,
+                        projection_opts,
+                        missing_data_passes,
+                        ..
+                    },
+                ..
+            } => {
+                match projection.project_attrs_record_batch(attrs_record_batch, projection_opts)? {
+                    Some(projected_rb) => {
+                        evaluate_df_expr(&logical_expr, physical_expr, eval_ctx, &projected_rb)
+                    }
+                    None => {
+                        if *missing_data_passes {
+                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))))
+                        } else {
+                            Ok(ColumnarValue::Scalar(ScalarValue::Null))
+                        }
+                    }
+                }
             }
             _ => Err(Error::InvalidPipelineError {
                 cause: "only Eval(DatafusionExpr) can be evaluated on a provided batch".into(),

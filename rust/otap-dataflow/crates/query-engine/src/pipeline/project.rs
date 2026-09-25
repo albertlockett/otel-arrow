@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, NullArray, RecordBatch, RecordBatchOptions, StructArray};
 use arrow::compute::cast;
+
 use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use arrow::error::ArrowError;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
@@ -17,7 +18,8 @@ use datafusion::logical_expr::Expr;
 use datafusion::scalar::ScalarValue;
 use otel_arrow_dfe_pdata::arrays::sanitize::sanitize_column;
 
-use crate::consts::VALUE_FIELD_NAME;
+use otel_arrow_dfe_pdata::schema::consts;
+
 use crate::error::Result;
 
 pub mod anyval;
@@ -52,28 +54,15 @@ pub struct ProjectionOptions {
 #[derive(Debug)]
 pub struct Projection {
     schema: ProjectedSchema,
-
-    /// Cached determination of whether a column in the projected schema is called "value".
-    ///
-    /// This is a special column which may be referenced in expressions that will evaluate on
-    /// attributes record batches. Whether the projection contains this column will be checked
-    /// during execution so we cache the determination ahead of time to avoid scanning all the
-    /// projection columns for every batch.
-    references_values_column: bool,
 }
 
 impl From<Vec<String>> for Projection {
     fn from(columns: Vec<String>) -> Self {
-        let references_values_column = columns
-            .iter()
-            .find(|col| col.as_str() == VALUE_FIELD_NAME)
-            .is_some();
         Self {
             schema: columns
                 .into_iter()
                 .map(ProjectedSchemaColumn::Root)
                 .collect(),
-            references_values_column,
         }
     }
 }
@@ -84,22 +73,9 @@ impl Projection {
     pub(crate) fn try_new(logical_expr: &Expr) -> Result<Self> {
         let mut visitor = ProjectedSchemaExprVisitor::default();
         _ = logical_expr.visit(&mut visitor)?;
-        let schema: ProjectedSchema = visitor.into();
-
-        let references_values_column = schema
-            .iter()
-            .find(|col| {
-                if let ProjectedSchemaColumn::Root(col_name) = col {
-                    col_name.as_str() == VALUE_FIELD_NAME
-                } else {
-                    false
-                }
-            })
-            .is_some();
 
         Ok(Self {
-            schema,
-            references_values_column,
+            schema: visitor.into(),
         })
     }
 
@@ -116,13 +92,29 @@ impl Projection {
             .is_some()
     }
 
-    /// Whether or not there is ca column called "values" in the projected schema
-    pub(crate) fn references_values_column(&self) -> bool {
-        self.references_values_column
-    }
+    /// Apply this projection to a record batch containing OTAP attributes.
+    ///
+    /// This is most appropriately invoked during evaluation of a nested pipeline applied to
+    /// attributes such as in the OPL query `logs | apply attributes { where <expr> }`. In this
+    /// case, we'd evaluate the expression (which would be planned as a datafusion expression) on
+    /// the attributes record batch. This evaluation requires some special because there is a
+    /// virtual "values" column that can be used in expressions, which must be replaced with the
+    /// actual column that contains the attribute values.
+    ///
+    pub fn project_attrs_record_batch(
+        &self,
+        attrs_record_batch: &RecordBatch,
+        options: &ProjectionOptions,
+    ) -> Result<Option<RecordBatch>> {
+        let mut projection_cols = ProjectionColumns::from(attrs_record_batch);
 
-    pub(crate) fn schema(&self) -> &ProjectedSchema {
-        &self.schema
+        let empty_projection = self.schema.is_empty();
+        let keys_only = self.schema.len() == 1 && self.references_column(consts::ATTRIBUTE_KEY);
+        if !empty_projection && !keys_only {
+            self.ensure_attrs_value_column_present(&mut projection_cols)?;
+        }
+
+        self.project_with_options(projection_cols, options)
     }
 
     pub fn project_with_options<T: Into<ProjectionColumns>>(
@@ -345,13 +337,6 @@ impl ProjectionColumns {
             self.fields[index] = FieldRef::new(new_field);
             self.columns[index] = new_column;
         }
-    }
-
-    pub(crate) fn rename_column(&mut self, old_column_name: &str, new_column_name: &str) {
-        // TODO comment on behaviour if column not found
-        if let Some((index_of, _)) = self.find(old_column_name) {
-            self.rename_column_at_index(index_of, new_column_name);
-        };
     }
 
     pub(crate) fn rename_column_at_index(&mut self, index: usize, new_column_name: &str) {
