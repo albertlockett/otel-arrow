@@ -774,34 +774,40 @@ impl BatchProcessor {
 
         match payload.into_data() {
             PayloadData::OtapArrowRecords(otap) => {
+                println!("batch handling OTAP");
                 if let Some(mut otap_format) = self.otap_format() {
                     otap_format
                         .for_signal(signal)
                         .accept_payload(effect, ctx, otap)
                         .await?
                 } else if let Some(mut otlp_format) = self.otlp_format() {
+                    println!("Converting OTAP to OTLP");
                     let otlp_payload = otap.try_into_with_default()?;
                     otlp_format
                         .for_signal(signal)
                         .accept_payload(effect, ctx, otlp_payload)
                         .await?
                 } else {
+                    println!("no active format for OTAP");
                     return Err(Self::no_active_format_error());
                 }
             }
             PayloadData::OtlpBytes(otlp) => {
+                println!("batch handling OTLP");
                 if let Some(mut otlp_format) = self.otlp_format() {
                     otlp_format
                         .for_signal(signal)
                         .accept_payload(effect, ctx, otlp)
                         .await?
                 } else if let Some(mut otap_format) = self.otap_format() {
+                    println!("Converting OTLP to OTAP");
                     let otap_payload = otlp.try_into_with_default()?;
                     otap_format
                         .for_signal(signal)
                         .accept_payload(effect, ctx, otap_payload)
                         .await?
                 } else {
+                    println!("no active format for OTLP");
                     return Err(Self::no_active_format_error());
                 }
             }

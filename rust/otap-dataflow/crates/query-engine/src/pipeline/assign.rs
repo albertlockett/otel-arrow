@@ -2103,9 +2103,12 @@ fn projection_references_column(expr: &ScopedExpr, col_name: &str) -> bool {
         ScopedExpr::Eval {
             eval: LeafEval::DatafusionExpr { projection, ..  },
             ..
-        } => projection.schema.iter().any(|projected_col| {
-            matches!(projected_col, ProjectedSchemaColumn::Root(name) if name == col_name)
-        }),
+        } => {
+            todo!()
+            // projection.schema.iter().any(|projected_col| {
+            //     matches!(projected_col, ProjectedSchemaColumn::Root(name) if name == col_name)
+            // }),
+        }
         _ => false,
     }
 }

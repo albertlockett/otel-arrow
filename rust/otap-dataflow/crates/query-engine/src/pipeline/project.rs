@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, NullArray, RecordBatch, RecordBatchOptions, StructArray};
+use arrow::array::{Array, ArrayRef, NullArray, RecordBatch, StructArray};
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
+use arrow::error::ArrowError;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion::common::{HashMap, HashSet};
 use datafusion::error::DataFusionError;
@@ -16,6 +17,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::scalar::ScalarValue;
 use otel_arrow_dfe_pdata::arrays::sanitize::sanitize_column;
 
+use crate::consts::VALUE_FIELD_NAME;
 use crate::error::Result;
 
 pub mod anyval;
@@ -43,19 +45,35 @@ pub struct ProjectionOptions {
     pub default_null_columns: bool,
 }
 
+// TODO - do we check anywhere that there isn't zero columns?
+// TODO - we don't support more than usize::num_bits columns
+
 /// Projection helper that can project a RecordBatch to only the columns needed by an expression
 #[derive(Debug)]
 pub struct Projection {
-    pub schema: ProjectedSchema,
+    schema: ProjectedSchema,
+
+    /// Cached determination of whether a column in the projected schema is called "value".
+    ///
+    /// This is a special column which may be referenced in expressions that will evaluate on
+    /// attributes record batches. Whether the projection contains this column will be checked
+    /// during execution so we cache the determination ahead of time to avoid scanning all the
+    /// projection columns for every batch.
+    references_values_column: bool,
 }
 
 impl From<Vec<String>> for Projection {
     fn from(columns: Vec<String>) -> Self {
+        let references_values_column = columns
+            .iter()
+            .find(|col| col.as_str() == VALUE_FIELD_NAME)
+            .is_some();
         Self {
             schema: columns
                 .into_iter()
                 .map(ProjectedSchemaColumn::Root)
                 .collect(),
+            references_values_column,
         }
     }
 }
@@ -66,9 +84,28 @@ impl Projection {
     pub(crate) fn try_new(logical_expr: &Expr) -> Result<Self> {
         let mut visitor = ProjectedSchemaExprVisitor::default();
         _ = logical_expr.visit(&mut visitor)?;
+        let schema: ProjectedSchema = visitor.into();
+
+        let references_values_column = schema
+            .iter()
+            .find(|col| {
+                if let ProjectedSchemaColumn::Root(col_name) = col {
+                    col_name.as_str() == VALUE_FIELD_NAME
+                } else {
+                    false
+                }
+            })
+            .is_some();
+
         Ok(Self {
-            schema: visitor.into(),
+            schema,
+            references_values_column,
         })
+    }
+
+    /// Whether or not there is ca column called "values" in the projected schema
+    pub(crate) fn references_values_column(&self) -> bool {
+        self.references_values_column
     }
 
     pub fn project_with_options(
@@ -76,77 +113,56 @@ impl Projection {
         record_batch: &RecordBatch,
         options: &ProjectionOptions,
     ) -> Result<Option<RecordBatch>> {
-        let (mut fields, mut columns) =
-            match self.project_columns(record_batch, options.default_null_columns) {
-                Some(projection) => projection,
-                None => return Ok(None),
-            };
+        let mut projection_cols = record_batch.into();
+        if !self.apply_to_columns(&mut projection_cols, options.default_null_columns) {
+            return Ok(None);
+        }
 
         if options.downcast_dicts {
-            Self::try_downcast_dicts(&mut fields, &mut columns)?;
+            // TODO just pass the projection cols
+            Self::try_downcast_dicts(&mut projection_cols.fields, &mut projection_cols.columns)?;
         }
 
         if options.sanitize_dicts {
-            Self::try_sanitize_columns(&mut columns)?;
+            Self::try_sanitize_columns(&mut projection_cols.columns)?;
         }
 
-        // safety: `try_new` should not return an error here unless the columns do not match the
-        // fields in the schema, or if the columns are different lengths. Based on how we've
-        // constructed the inputs, this should not happen because we've taken them from the input
-        let rb = RecordBatch::try_new_with_options(
-            Arc::new(Schema::new(fields)),
-            columns,
-            &RecordBatchOptions::new().with_row_count(Some(record_batch.num_rows())),
-        )
-        .expect("can project record batch");
-
-        Ok(Some(rb))
+        Ok(Some(projection_cols.try_into()?))
     }
 
-    fn project_columns(
+    // TODO - comment on return type
+    fn apply_to_columns(
         &self,
-        record_batch: &RecordBatch,
+        projection_cols: &mut ProjectionColumns,
         default_nulls: bool,
-    ) -> Option<(Vec<Arc<Field>>, Vec<ArrayRef>)> {
-        let original_schema = record_batch.schema_ref();
-
-        // TODO - if the heap allocations here have significant perf overhead, we could try reusing
-        // these arrays between batches.
-        let mut columns = Vec::new();
-        let mut fields = Vec::new();
+    ) -> bool {
+        let mut columns_to_keep = 0usize;
 
         for projected_col in &self.schema {
             match projected_col {
                 ProjectedSchemaColumn::Root(desired_col_name) => {
-                    let (column, field) =
-                        if let Ok(index) = original_schema.index_of(desired_col_name) {
-                            // original column
-                            Some((
-                                record_batch.column(index).clone(),
-                                original_schema.fields[index].clone(),
-                            ))
-                        } else if default_nulls {
-                            // default nulls
-                            Some((
-                                Arc::new(NullArray::new(record_batch.num_rows())) as ArrayRef,
-                                Arc::new(Field::new(desired_col_name, DataType::Null, true)),
-                            ))
-                        } else {
-                            // column could not be projected
-                            None
-                        }?;
-                    columns.push(column);
-                    fields.push(field);
+                    if let Some((index, _)) = projection_cols.find(desired_col_name) {
+                        columns_to_keep |= 1 << index;
+                    } else if default_nulls {
+                        // default nulls
+                        columns_to_keep |= projection_cols.fields.len();
+                        projection_cols.push(
+                            Field::new(desired_col_name, DataType::Null, true),
+                            Arc::new(NullArray::new(projection_cols.num_rows())),
+                        );
+                    } else {
+                        return false;
+                    };
                 }
                 ProjectedSchemaColumn::Struct(desired_struct_name, desired_struct_fields) => {
-                    let struct_index = original_schema.index_of(desired_struct_name).ok();
+                    let struct_index = projection_cols.find(desired_struct_name).map(|(i, _)| i);
                     if struct_index.is_none() && !default_nulls {
-                        return None;
+                        return false;
                     }
 
                     let struct_col = struct_index.and_then(|i| {
-                        record_batch
-                            .column(i)
+                        // TODO - for extra extra safety here, we could use .get() instead of indexing
+                        (&projection_cols.columns[i])
                             .as_any()
                             .downcast_ref::<StructArray>()
                     });
@@ -155,22 +171,27 @@ impl Projection {
                     let mut struct_field_defs = Vec::new();
 
                     for field_name in desired_struct_fields {
-                        let (struct_field, field_def) = struct_col
+                        let Some((struct_field, field_def)) = struct_col
                             .and_then(|struct_col| struct_col.fields().find(field_name))
                             .map(|(field_index, field)| {
                                 (
+                                    // TODO add safety comment
                                     struct_col.expect("not none").column(field_index).clone(),
                                     field.clone(),
                                 )
                             })
                             .or(if default_nulls {
                                 Some((
-                                    Arc::new(NullArray::new(record_batch.num_rows())) as ArrayRef,
+                                    Arc::new(NullArray::new(projection_cols.num_rows()))
+                                        as ArrayRef,
                                     Arc::new(Field::new(field_name, DataType::Null, true)),
                                 ))
                             } else {
                                 None
-                            })?;
+                            })
+                        else {
+                            return false;
+                        };
 
                         struct_fields.push(struct_field);
                         struct_field_defs.push(field_def)
@@ -180,32 +201,47 @@ impl Projection {
                     // for the fields do not match the field definitions, or if the arrays have
                     // different lengths. Based on the way we've constructed inputs, this should
                     // not happen because we've taken them from the input struct column in order
-                    let projected_struct_arr = StructArray::try_new(
-                        struct_field_defs.into(),
-                        struct_fields,
-                        struct_col.map(|arr| arr.nulls().cloned()).unwrap_or(None),
-                    )
-                    .expect("can init StructArray");
-
-                    let projected_field = if let Some(struct_index) = struct_index {
-                        original_schema.fields[struct_index]
-                            .as_ref()
-                            .clone()
-                            .with_data_type(projected_struct_arr.data_type().clone())
-                    } else {
-                        Field::new(
-                            desired_struct_name,
-                            projected_struct_arr.data_type().clone(),
-                            true,
+                    let projected_struct_arr = Arc::new(
+                        StructArray::try_new(
+                            struct_field_defs.into(),
+                            struct_fields,
+                            struct_col.map(|arr| arr.nulls().cloned()).unwrap_or(None),
                         )
+                        .expect("can init StructArray"),
+                    );
+
+                    if let Some(struct_index) = struct_index {
+                        columns_to_keep |= 1 << struct_index;
+                        projection_cols.replace_column(struct_index, projected_struct_arr);
+                    } else {
+                        columns_to_keep |= 1 << projection_cols.fields.len();
+                        projection_cols.push(
+                            Field::new(
+                                desired_struct_name,
+                                projected_struct_arr.data_type().clone(),
+                                true,
+                            ),
+                            projected_struct_arr,
+                        );
                     };
-                    fields.push(Arc::new(projected_field));
-                    columns.push(Arc::new(projected_struct_arr));
                 }
             }
         }
 
-        Some((fields, columns))
+        let mut index = 0;
+        projection_cols.columns.retain(|_| {
+            let keep = (columns_to_keep & (1 << index)) != 0;
+            index += 1;
+            keep
+        });
+        index = 0;
+        projection_cols.fields.retain(|_| {
+            let keep = (columns_to_keep & (1 << index)) != 0;
+            index += 1;
+            keep
+        });
+
+        return true;
     }
 
     pub fn try_downcast_dicts(fields: &mut [Arc<Field>], columns: &mut [ArrayRef]) -> Result<()> {
@@ -230,6 +266,76 @@ impl Projection {
         }
 
         Ok(())
+    }
+}
+
+/// Columns and fields that will be operated on by [`Projection`].
+pub(crate) struct ProjectionColumns {
+    fields: Vec<FieldRef>,
+    columns: Vec<ArrayRef>,
+}
+
+impl From<&RecordBatch> for ProjectionColumns {
+    fn from(rb: &RecordBatch) -> Self {
+        let fields = rb.schema_ref().fields().to_vec();
+        let columns = rb.columns().to_vec();
+        Self { fields, columns }
+    }
+}
+
+impl TryFrom<ProjectionColumns> for RecordBatch {
+    type Error = ArrowError;
+
+    fn try_from(columns: ProjectionColumns) -> std::result::Result<Self, Self::Error> {
+        // TODO - test to ensure this doesn't fail for empty batch
+        // TODO - what if there's zero columns?
+        RecordBatch::try_new(Arc::new(Schema::new(columns.fields)), columns.columns)
+    }
+}
+
+impl ProjectionColumns {
+    fn new() -> Self {
+        Self {
+            columns: Vec::new(),
+            fields: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, field: Field, column: ArrayRef) {
+        self.fields.push(FieldRef::new(field));
+        self.columns.push(column);
+    }
+
+    fn find(&self, column_name: &str) -> Option<(usize, &FieldRef)> {
+        self.fields
+            .iter()
+            .enumerate()
+            .find(|(_, b)| b.name() == column_name)
+    }
+
+    fn replace_column(&mut self, index: usize, new_column: ArrayRef) {
+        // TODO comment on behaviour if index is oob
+        if let Some(field) = self.fields.get(index) {
+            let new_field = field
+                .as_ref()
+                .clone()
+                .with_data_type(new_column.data_type().clone());
+            self.fields[index] = FieldRef::new(new_field);
+            self.columns[index] = new_column;
+        }
+    }
+
+    fn rename_column(&mut self, old_column_name: &str, new_column_name: &str) {
+        // TODO comment on behaviour if column not found
+        if let Some((index_of, field)) = self.find(old_column_name) {
+            let new_field = field.as_ref().clone().with_name(new_column_name);
+            self.fields[index_of] = FieldRef::new(new_field);
+        };
+    }
+
+    fn num_rows(&self) -> usize {
+        // assume all the columns have the same length
+        self.columns.get(0).map(|col| col.len()).unwrap_or_default()
     }
 }
 

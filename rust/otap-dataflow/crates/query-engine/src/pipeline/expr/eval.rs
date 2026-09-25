@@ -50,6 +50,8 @@ use crate::pipeline::project::anyval::{
 use crate::pipeline::project::{Projection, ProjectionOptions};
 use otel_arrow_dfe_pdata::otap::filter::IdBitmapPool;
 
+mod batch;
+
 /// Context for evaluating [`ScopedExpr`]
 pub(crate) struct EvalContext<'a> {
     /// When evaluating a [`ScopedExpr`] and encountering a data scope identifying the source
@@ -127,6 +129,9 @@ impl ScopedExpr {
             Self::BitmapNot(child) => execute_bitmap_not_as_value(child, otap_batch, eval_ctx),
         }
     }
+
+    // TODO - replace this with the eval::batch::evaluate_on_batch and also update the out of
+    // date comment
 
     /// Evaluate this node directly on the provided `RecordBatch`, ignoring scope resolution.
     ///
