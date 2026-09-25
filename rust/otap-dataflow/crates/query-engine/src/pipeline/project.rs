@@ -103,17 +103,34 @@ impl Projection {
         })
     }
 
+    pub(crate) fn references_column(&self, col_name: &str) -> bool {
+        self.schema
+            .iter()
+            .find(|col| {
+                if let ProjectedSchemaColumn::Root(schema_col_name) = col {
+                    schema_col_name.as_str() == col_name
+                } else {
+                    false
+                }
+            })
+            .is_some()
+    }
+
     /// Whether or not there is ca column called "values" in the projected schema
     pub(crate) fn references_values_column(&self) -> bool {
         self.references_values_column
     }
 
-    pub fn project_with_options(
+    pub(crate) fn schema(&self) -> &ProjectedSchema {
+        &self.schema
+    }
+
+    pub fn project_with_options<T: Into<ProjectionColumns>>(
         &self,
-        record_batch: &RecordBatch,
+        input: T,
         options: &ProjectionOptions,
     ) -> Result<Option<RecordBatch>> {
-        let mut projection_cols = record_batch.into();
+        let mut projection_cols = input.into();
         if !self.apply_to_columns(&mut projection_cols, options.default_null_columns) {
             return Ok(None);
         }
@@ -146,7 +163,7 @@ impl Projection {
                     } else if default_nulls {
                         // default nulls
                         columns_to_keep |= projection_cols.fields.len();
-                        projection_cols.push(
+                        projection_cols.append_column(
                             Field::new(desired_col_name, DataType::Null, true),
                             Arc::new(NullArray::new(projection_cols.num_rows())),
                         );
@@ -212,10 +229,10 @@ impl Projection {
 
                     if let Some(struct_index) = struct_index {
                         columns_to_keep |= 1 << struct_index;
-                        projection_cols.replace_column(struct_index, projected_struct_arr);
+                        projection_cols.replace_column_at_index(struct_index, projected_struct_arr);
                     } else {
                         columns_to_keep |= 1 << projection_cols.fields.len();
-                        projection_cols.push(
+                        projection_cols.append_column(
                             Field::new(
                                 desired_struct_name,
                                 projected_struct_arr.data_type().clone(),
@@ -301,19 +318,23 @@ impl ProjectionColumns {
         }
     }
 
-    fn push(&mut self, field: Field, column: ArrayRef) {
+    pub(crate) fn columns(&self) -> &[ArrayRef] {
+        &self.columns
+    }
+
+    pub(crate) fn append_column(&mut self, field: Field, column: ArrayRef) {
         self.fields.push(FieldRef::new(field));
         self.columns.push(column);
     }
 
-    fn find(&self, column_name: &str) -> Option<(usize, &FieldRef)> {
+    pub(crate) fn find(&self, column_name: &str) -> Option<(usize, &FieldRef)> {
         self.fields
             .iter()
             .enumerate()
             .find(|(_, b)| b.name() == column_name)
     }
 
-    fn replace_column(&mut self, index: usize, new_column: ArrayRef) {
+    fn replace_column_at_index(&mut self, index: usize, new_column: ArrayRef) {
         // TODO comment on behaviour if index is oob
         if let Some(field) = self.fields.get(index) {
             let new_field = field
@@ -325,12 +346,19 @@ impl ProjectionColumns {
         }
     }
 
-    fn rename_column(&mut self, old_column_name: &str, new_column_name: &str) {
+    pub(crate) fn rename_column(&mut self, old_column_name: &str, new_column_name: &str) {
         // TODO comment on behaviour if column not found
-        if let Some((index_of, field)) = self.find(old_column_name) {
-            let new_field = field.as_ref().clone().with_name(new_column_name);
-            self.fields[index_of] = FieldRef::new(new_field);
+        if let Some((index_of, _)) = self.find(old_column_name) {
+            self.rename_column_at_index(index_of, new_column_name);
         };
+    }
+
+    pub(crate) fn rename_column_at_index(&mut self, index: usize, new_column_name: &str) {
+        // TODO comment on behaviour if column not found
+        if let Some(field) = self.fields.get(index) {
+            let new_field = field.as_ref().clone().with_name(new_column_name);
+            self.fields[index] = FieldRef::new(new_field);
+        }
     }
 
     fn num_rows(&self) -> usize {

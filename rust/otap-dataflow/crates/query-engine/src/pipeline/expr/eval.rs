@@ -130,31 +130,21 @@ impl ScopedExpr {
         }
     }
 
-    // TODO - replace this with the eval::batch::evaluate_on_batch and also update the out of
-    // date comment
-
     /// Evaluate this node directly on the provided `RecordBatch`, ignoring scope resolution.
     ///
     /// Used for nested attribute pipelines where the "root" is the attributes batch itself
     /// (e.g., `logs | apply attributes { set value = value + 2 }`).
     ///
-    /// Supports `Eval(DatafusionExpr)` nodes and boolean combination nodes (`BitmapAnd`,
-    /// `BitmapOr`, `BitmapNot`) which recursively evaluate their children on the same batch.
-    pub(crate) fn evaluate_on_batch(
+    /// Supports `Eval(DatafusionExpr)` nodes only
+    pub(crate) fn evaluate_on_attrs_batch(
         &mut self,
-        record_batch: &RecordBatch,
+        attrs_record_batch: &RecordBatch,
         eval_ctx: &EvalContext<'_>,
     ) -> Result<ColumnarValue> {
         match self {
-            Self::Eval {
-                eval:
-                    LeafEval::DatafusionExpr {
-                        logical_expr,
-                        physical_expr,
-                        ..
-                    },
-                ..
-            } => evaluate_df_expr(logical_expr, physical_expr, eval_ctx, record_batch),
+            Self::Eval { eval, .. } => {
+                batch::evaluate_on_attrs_batch(attrs_record_batch, eval, eval_ctx)
+            }
             _ => Err(Error::InvalidPipelineError {
                 cause: "only Eval(DatafusionExpr) can be evaluated on a provided batch".into(),
                 query_location: None,

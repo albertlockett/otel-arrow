@@ -1381,7 +1381,7 @@ impl PipelineStage for AssignPipelineStage {
 
         // evaluate the expression
         let mut result = self.sources[0]
-            .evaluate_on_batch(&projected_rb, &EvalContext::new(session_context))?
+            .evaluate_on_attrs_batch(&projected_rb, &EvalContext::new(session_context))?
             .to_array(attrs_record_batch.num_rows())?;
 
         // determine the "logical" type of the result (e.g. the array type, or the values if the
@@ -2101,7 +2101,7 @@ fn decompose_any_value_upsert<'a, T: ArrowPrimitiveType>(
 fn projection_references_column(expr: &ScopedExpr, col_name: &str) -> bool {
     match expr {
         ScopedExpr::Eval {
-            eval: LeafEval::DatafusionExpr { projection, ..  },
+            eval: LeafEval::DatafusionExpr { projection, .. },
             ..
         } => {
             todo!()
