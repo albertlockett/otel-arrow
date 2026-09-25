@@ -1174,31 +1174,19 @@ mod test {
         );
     }
 
-    // TODO need to fix this - we shouldn't have to manually remove the column.
-    // also, we can assert that result assigns itself but it may be equally
-    // valid ot just check that the result of something that is homogeneously
-    // default values is a missing column.
-    #[ignore]
     #[tokio::test]
     async fn test_pipeline_set_missing_int_column() {
         let input = to_logs_data(vec![
             LogRecord::build()
                 .attributes(vec![
-                    // placeholder values, will replace with nulls
                     KeyValue::new("k1", AnyValue::new_int(0)),
-                    KeyValue::new("k2", AnyValue::new_int(1)),
+                    KeyValue::new("k2", AnyValue::new_int(0)),
                 ])
                 .finish(),
         ]);
-        let mut input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
-        let mut log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
-        let (id_col_index, _) = log_attrs
-            .schema()
-            .fields()
-            .find(consts::ATTRIBUTE_INT)
-            .unwrap();
-        _ = log_attrs.remove_column(id_col_index);
-        input.set(ArrowPayloadType::LogAttrs, log_attrs).unwrap();
+        let input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
+        let log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
+        assert!(log_attrs.column_by_name(consts::ATTRIBUTE_INT).is_none());
 
         let query = r#"
             logs | apply attributes {
@@ -1209,17 +1197,22 @@ mod test {
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(input).await.unwrap();
 
-        // null + 2 would evaluate to null, which means the whole column is null which means
-        // the column should not be in the result
-        let logs_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
-        assert!(logs_attrs.column_by_name(consts::ATTRIBUTE_INT).is_none());
+        let result_as_otlp = otap_to_otlp(&result);
+        let expected = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("k1", AnyValue::new_int(2)),
+                    KeyValue::new("k2", AnyValue::new_int(2)),
+                ])
+                .finish(),
+        ]);
+
+        assert_equivalent(
+            &[result_as_otlp],
+            &[OtlpProtoMessage::Logs(expected.clone())],
+        );
     }
 
-    // TODO need to fix this - we shouldn't have to manually remove the column.
-    // also, we can assert that result assigns itself but it may be equally
-    // valid ot just check that the result of something that is homogeneously
-    // default values is a missing column.
-    #[ignore]
     #[tokio::test]
     async fn test_pipeline_set_missing_float_column() {
         let input = to_logs_data(vec![
@@ -1227,19 +1220,13 @@ mod test {
                 .attributes(vec![
                     // placeholder values, will replace with nulls
                     KeyValue::new("k1", AnyValue::new_double(0.0)),
-                    KeyValue::new("k2", AnyValue::new_double(1.0)),
+                    KeyValue::new("k2", AnyValue::new_double(0.0)),
                 ])
                 .finish(),
         ]);
-        let mut input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
-        let mut log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
-        let (id_col_index, _) = log_attrs
-            .schema()
-            .fields()
-            .find(consts::ATTRIBUTE_DOUBLE)
-            .unwrap();
-        _ = log_attrs.remove_column(id_col_index);
-        input.set(ArrowPayloadType::LogAttrs, log_attrs).unwrap();
+        let input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
+        let log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
+        assert!(log_attrs.column_by_name(consts::ATTRIBUTE_DOUBLE).is_none());
 
         let query = r#"
             logs | apply attributes {
@@ -1249,36 +1236,38 @@ mod test {
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(input).await.unwrap();
+        let result_as_otlp = otap_to_otlp(&result);
+        
+        let expected = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("k1", AnyValue::new_double(2.0)),
+                    KeyValue::new("k2", AnyValue::new_double(2.0)),
+                ])
+                .finish(),
+        ]);
 
-        // null + 2.0 would evaluate to null, which means the whole column is null which means
-        // the column should not be in the result
-        let logs_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
-        assert!(
-            logs_attrs
-                .column_by_name(consts::ATTRIBUTE_DOUBLE)
-                .is_none()
+        assert_equivalent(
+            &[result_as_otlp],
+            &[OtlpProtoMessage::Logs(expected.clone())],
         );
     }
 
-    // TODO need to fix this - I'm not sure the bool column is ever actually
-    // missing, but even so the test shouldn't have to manually remove it.
-    // also, we can assert that result assigns itself but it may be equally
-    // valid ot just check that the result of something that is homogeneously
-    // default values is a missing column.
-    #[ignore]
     #[tokio::test]
     async fn test_pipeline_set_missing_bool_column() {
         let input = to_logs_data(vec![
             LogRecord::build()
                 .attributes(vec![
-                    // placeholder values, will replace with nulls
                     KeyValue::new("k1", AnyValue::new_bool(false)),
-                    KeyValue::new("k2", AnyValue::new_bool(true)),
+                    KeyValue::new("k2", AnyValue::new_bool(false)),
                 ])
                 .finish(),
         ]);
         let mut input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
         let mut log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
+        
+        // bool isn't a required column, but the OTAP encoder actually currently always
+        // inserts it, so we need to manually remove it
         let (id_col_index, _) = log_attrs
             .schema()
             .fields()
@@ -1287,60 +1276,70 @@ mod test {
         _ = log_attrs.remove_column(id_col_index);
         input.set(ArrowPayloadType::LogAttrs, log_attrs).unwrap();
 
-        // kind of a useless update, but just trying to test something that will read from
-        // a null column and also produce a null result
         let query = r#"
             logs | apply attributes {
-                set value = value
+                set value = not(value)
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(input).await.unwrap();
+        
+        let result_as_otlp = otap_to_otlp(&result);
+        
+        let expected = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("k1", AnyValue::new_bool(true)),
+                    KeyValue::new("k2", AnyValue::new_bool(true)),
+                ])
+                .finish(),
+        ]);
 
-        let logs_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
-        assert!(logs_attrs.column_by_name(consts::ATTRIBUTE_BOOL).is_none());
+        assert_equivalent(
+            &[result_as_otlp],
+            &[OtlpProtoMessage::Logs(expected.clone())],
+        );
     }
 
-    // TODO need to fix this - we shouldn't have to manually remove the column.
-    // also, we can assert that result assigns itself but it may be equally
-    // valid ot just check that the result of something that is homogeneously
-    // default values is a missing column.
-    #[ignore]
     #[tokio::test]
     async fn test_pipeline_set_missing_str_column() {
         let input = to_logs_data(vec![
             LogRecord::build()
                 .attributes(vec![
                     // placeholder values, will replace with nulls
-                    KeyValue::new("k1", AnyValue::new_string("a")),
+                    KeyValue::new("k1", AnyValue::new_string("")),
                     KeyValue::new("k2", AnyValue::new_string("")),
                 ])
                 .finish(),
         ]);
-        let mut input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
-        let mut log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
-        let (id_col_index, _) = log_attrs
-            .schema()
-            .fields()
-            .find(consts::ATTRIBUTE_STR)
-            .unwrap();
-        _ = log_attrs.remove_column(id_col_index);
-        input.set(ArrowPayloadType::LogAttrs, log_attrs).unwrap();
-
-        // kind of a useless update, but just trying to test something that will read from
-        // a null column and also produce a null result
+        let input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
+        let log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
+        assert!(log_attrs.column_by_name(consts::ATTRIBUTE_STR).is_none());
+       
         let query = r#"
             logs | apply attributes {
-                set value = value
+                set value = concat(value, "hello")
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(input).await.unwrap();
+        let result_as_otlp = otap_to_otlp(&result);
 
-        let logs_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
-        assert!(logs_attrs.column_by_name(consts::ATTRIBUTE_STR).is_none());
+        let expected = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("k1", AnyValue::new_string("hello")),
+                    KeyValue::new("k2", AnyValue::new_string("hello")),
+                ])
+                .finish(),
+        ]);
+
+        assert_equivalent(
+            &[result_as_otlp],
+            &[OtlpProtoMessage::Logs(expected.clone())],
+        );
     }
 
     #[tokio::test]
@@ -1690,6 +1689,38 @@ mod test {
                         ),
                     ),
                     KeyValue::new("not_sensitive", AnyValue::new_string("y")),
+                ])
+                .finish(),
+        ]);
+
+        assert_equivalent(
+            &[OtlpProtoMessage::Logs(result)],
+            &[OtlpProtoMessage::Logs(expected)],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_set_attribute_to_result_of_predicate_involving_missing_column() {
+        let input = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("k1", AnyValue::new_string("")),
+                    KeyValue::new("k2", AnyValue::new_string("")),
+                ])
+                .finish(),
+        ]);
+        let query = r#"
+            logs | apply attributes {
+                set value = value == ""
+            }"#;
+
+        let result = exec_logs_pipeline::<OplParser>(query, input).await;
+
+        let expected = to_logs_data(vec![
+            LogRecord::build()
+                .attributes(vec![
+                    KeyValue::new("k1", AnyValue::new_bool(true)),
+                    KeyValue::new("k2", AnyValue::new_bool(true)),
                 ])
                 .finish(),
         ]);

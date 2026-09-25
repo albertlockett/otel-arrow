@@ -27,8 +27,7 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, NullArray,
-    RecordBatch, StringArray, UInt8Array,
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, NullArray, RecordBatch, StringArray, UInt8Array, UInt16Array,
 };
 use arrow::buffer::{BooleanBuffer, Buffer, MutableBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::compute::kernels::cmp::neq;
@@ -254,11 +253,11 @@ fn default_values_column(attr_type: AttributeValueType, num_rows: usize) -> Arra
             None,
         )),
         AttributeValueType::Int => Arc::new(DictionaryArray::new(
-            UInt8Array::new(ScalarBuffer::from(vec![0u8; num_rows]), None),
+            UInt8Array::new(ScalarBuffer::from(vec![0; num_rows]), None),
             Arc::new(Int64Array::new(ScalarBuffer::from(vec![0]), None)),
         )),
         AttributeValueType::Str => Arc::new(DictionaryArray::new(
-            UInt8Array::new(ScalarBuffer::from(vec![0u8; num_rows]), None),
+            UInt16Array::new(ScalarBuffer::from(vec![0; num_rows]), None),
             Arc::new(StringArray::new(
                 OffsetBuffer::new_zeroed(num_rows),
                 MutableBuffer::new(0).into(),
