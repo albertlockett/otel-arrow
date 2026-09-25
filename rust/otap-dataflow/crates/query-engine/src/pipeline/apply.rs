@@ -641,7 +641,7 @@ mod test {
         );
     }
 
-    /// Scenario: a predicate where the value column used in the predicate can be statically
+    /// Scenario: a filter predicate where the value column used in the predicate can be statically
     /// predetermined is an optional column that is missing from the batch.
     /// Guarantees: no error is produced, and the column is treated as a default value
     #[tokio::test]
@@ -669,13 +669,9 @@ mod test {
         );
 
         let result = pipeline.execute(input.clone()).await.unwrap();
-        let OtlpProtoMessage::Logs(result) = otap_to_otlp(&result) else {
-            panic!("invalid signal type")
-        };
-
         let expected = to_logs_data(vec![LogRecord::build().attributes(Vec::new()).finish()]);
         assert_equivalent(
-            &[OtlpProtoMessage::Logs(result)],
+            &[otap_to_otlp(&result)],
             &[OtlpProtoMessage::Logs(expected)],
         );
 
@@ -690,12 +686,9 @@ mod test {
         );
 
         let result = pipeline.execute(input.clone()).await.unwrap();
-        let OtlpProtoMessage::Logs(result) = otap_to_otlp(&result) else {
-            panic!("invalid signal type")
-        };
         let expected = to_logs_data(log_records.clone());
         assert_equivalent(
-            &[OtlpProtoMessage::Logs(result)],
+            &[otap_to_otlp(&result)],
             &[OtlpProtoMessage::Logs(expected)],
         );
     }
@@ -735,19 +728,13 @@ mod test {
             .index_of(consts::ATTRIBUTE_DOUBLE)
             .unwrap();
 
-        let OtlpProtoMessage::Logs(result1) =
-            otap_to_otlp(&pipeline.execute(input1).await.unwrap())
-        else {
-            panic!("invalid signal type")
-        };
-
         let expected1 = to_logs_data(vec![
             LogRecord::build()
                 .attributes(vec![KeyValue::new("k2", AnyValue::new_double(14.0))])
                 .finish(),
         ]);
         assert_equivalent(
-            &[OtlpProtoMessage::Logs(result1)],
+            &[otap_to_otlp(&pipeline.execute(input1).await.unwrap())],
             &[OtlpProtoMessage::Logs(expected1)],
         );
 
@@ -769,12 +756,6 @@ mod test {
 
         assert_ne!(batch1_pos, batch2_pos);
 
-        let OtlpProtoMessage::Logs(result2) =
-            otap_to_otlp(&pipeline.execute(input2).await.unwrap())
-        else {
-            panic!("invalid signal type")
-        };
-
         let expected2 = to_logs_data(vec![
             LogRecord::build()
                 .attributes(vec![
@@ -784,7 +765,7 @@ mod test {
                 .finish(),
         ]);
         assert_equivalent(
-            &[OtlpProtoMessage::Logs(result2)],
+            &[otap_to_otlp(&pipeline.execute(input2).await.unwrap())],
             &[OtlpProtoMessage::Logs(expected2)],
         );
     }
@@ -1237,7 +1218,7 @@ mod test {
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(input).await.unwrap();
         let result_as_otlp = otap_to_otlp(&result);
-        
+
         let expected = to_logs_data(vec![
             LogRecord::build()
                 .attributes(vec![
@@ -1265,7 +1246,7 @@ mod test {
         ]);
         let mut input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
         let mut log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
-        
+
         // bool isn't a required column, but the OTAP encoder actually currently always
         // inserts it, so we need to manually remove it
         let (id_col_index, _) = log_attrs
@@ -1284,9 +1265,9 @@ mod test {
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
         let mut pipeline = Pipeline::new(pipeline_expr);
         let result = pipeline.execute(input).await.unwrap();
-        
+
         let result_as_otlp = otap_to_otlp(&result);
-        
+
         let expected = to_logs_data(vec![
             LogRecord::build()
                 .attributes(vec![
@@ -1316,7 +1297,7 @@ mod test {
         let input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
         let log_attrs = input.get(ArrowPayloadType::LogAttrs).unwrap().clone();
         assert!(log_attrs.column_by_name(consts::ATTRIBUTE_STR).is_none());
-       
+
         let query = r#"
             logs | apply attributes {
                 set value = concat(value, "hello")

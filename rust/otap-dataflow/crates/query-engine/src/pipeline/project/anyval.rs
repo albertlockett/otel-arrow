@@ -907,7 +907,7 @@ impl Projection {
         if self.references_column(VALUE_COLUMN_NAME) {
             if let Some(values_column_name) = physical_values_column_name {
                 if let Some((index, field)) = projection_cols.find(values_column_name) {
-                    if self.schema.len() > 0 && self.references_column(values_column_name) {
+                    if !self.schema.is_empty() && self.references_column(values_column_name) {
                         // duplicate the column to be the values column as it's referenced both
                         // virtually (as "value") and by its actual physical column name
                         projection_cols.append_column(

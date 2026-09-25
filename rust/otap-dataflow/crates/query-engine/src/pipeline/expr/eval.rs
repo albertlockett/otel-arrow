@@ -154,7 +154,7 @@ impl ScopedExpr {
             } => {
                 match projection.project_attrs_record_batch(attrs_record_batch, projection_opts)? {
                     Some(projected_rb) => {
-                        evaluate_df_expr(&logical_expr, physical_expr, eval_ctx, &projected_rb)
+                        evaluate_df_expr(logical_expr, physical_expr, eval_ctx, &projected_rb)
                     }
                     None => {
                         if *missing_data_passes {

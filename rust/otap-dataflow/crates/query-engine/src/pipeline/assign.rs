@@ -19,9 +19,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, DictionaryArray, Float64Array,
-    Int64Array, NullArray, PrimitiveArray, RecordBatch, StringArray, StructArray, UInt8Array,
-    UInt16Array,
+    Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, DictionaryArray, PrimitiveArray,
+    RecordBatch, StringArray, StructArray, UInt8Array, UInt16Array,
 };
 use arrow::buffer::{BooleanBuffer, ScalarBuffer};
 use arrow::compute::kernels::cmp::{eq, neq};
@@ -77,15 +76,13 @@ use crate::pipeline::expr::types::{
     root_field_supports_dict_encoding, root_field_type,
 };
 use crate::pipeline::expr::{
-    ChildRecordKind, DataScope, LeafEval, RecordScope, RootParentStruct, ScopedExpr, ScopedValue,
-    VALUE_COLUMN_NAME,
+    ChildRecordKind, DataScope, RecordScope, RootParentStruct, ScopedExpr, ScopedValue,
 };
 use crate::pipeline::planner::{AttributesIdentifier, ColumnAccessor, RecordType};
 use crate::pipeline::project::anyval::{
     attempt_coerce_value_column_from_any_value_struct_column, fill_null_type_as_empty,
     is_any_value_data_type, wrap_as_any_value_struct,
 };
-use crate::pipeline::project::{ProjectedSchemaColumn, Projection};
 use crate::pipeline::state::ExecutionState;
 
 /// Representation of assignment source and destination
@@ -119,10 +116,6 @@ pub(crate) struct AssignPipelineStage {
     /// Unified execution trees that produce the data to be assigned to the destination.
     sources: Vec<ScopedExpr>,
 
-    // /// When this pipeline stage is used in a nested pipeline that processes attributes, it may be
-    // /// applying an expression that references the virtual "value" column. This flag will be set if
-    // /// the expression references this column.
-    // projection_contains_value_column: bool,
     /// This is used when assigning attributes to keep track of ID/parent ID membership as we
     /// determine which attributes must be updated or inserted
     id_bitmap_pool: IdBitmapPool,
@@ -182,13 +175,6 @@ impl AssignPipelineStage {
             source_exprs.push(assignment.source.expr);
         }
 
-        // // determine, in the case that we're doing assignment on a nested pipeline for attributes,
-        // // whether we need to project the virtual "value" column. We only look at the first expr
-        // // because for these nested pipelines, the planner shouldn't be combining multiple
-        // // set expressions together due to them all having the same destination.
-        // let projection_contains_value_column =
-        //     projection_references_column(&source_exprs[0], VALUE_COLUMN_NAME);
-
         Ok(Self {
             dest_scopes: dest_columns
                 .iter()
@@ -197,7 +183,6 @@ impl AssignPipelineStage {
                 .collect(),
             dest_columns,
             sources: source_exprs,
-            // projection_contains_value_column,
             id_bitmap_pool: IdBitmapPool::new(),
         })
     }
@@ -1293,7 +1278,6 @@ impl PipelineStage for AssignPipelineStage {
         let all_rows_same_attr_type =
             neq(type_column, &UInt8Array::new_scalar(input_attr_type as u8))?.true_count() == 0;
 
-
         // evaluate the expression
         let mut result = self.sources[0]
             .evaluate_on_attrs_batch(&attrs_record_batch, &EvalContext::new(session_context))?
@@ -2007,43 +1991,6 @@ fn decompose_any_value_upsert<'a, T: ArrowPrimitiveType>(
     }
 
     Ok(upserts)
-}
-
-// TODO no longer needed
-
-// /// Check if the top-level `Eval(DatafusionExpr)` node's projection references a given column.
-// ///
-// /// Returns `true` if this is an `Eval(DatafusionExpr)` node whose projection includes the
-// /// specified column name. For non-`Eval` nodes or `BatchPredicate` leaves, returns `false`.
-// fn projection_references_column(expr: &ScopedExpr, col_name: &str) -> bool {
-//     match expr {
-//         ScopedExpr::Eval {
-//             eval: LeafEval::DatafusionExpr { projection, .. },
-//             ..
-//         } => {
-//             todo!()
-//             // projection.schema.iter().any(|projected_col| {
-//             //     matches!(projected_col, ProjectedSchemaColumn::Root(name) if name == col_name)
-//             // }),
-//         }
-//         _ => false,
-//     }
-// }
-
-// TODO - move this somewhere more sensible ...
-
-/// Returns the `downcast_dicts` option from the inner `LeafEval::DatafusionExpr` projection
-/// options, if this is an `Eval(DatafusionExpr)` node. Returns `false` otherwise.
-pub(crate) fn leaf_requires_dict_downcast(expr: &ScopedExpr) -> bool {
-    match expr {
-        ScopedExpr::Eval {
-            eval: LeafEval::DatafusionExpr {
-                projection_opts, ..
-            },
-            ..
-        } => projection_opts.downcast_dicts,
-        _ => false,
-    }
 }
 
 /// Validate that the results of the passed expression can be assigned to the destination.

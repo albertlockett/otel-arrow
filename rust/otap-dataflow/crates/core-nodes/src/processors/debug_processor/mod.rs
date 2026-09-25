@@ -36,7 +36,7 @@ use otel_arrow_dfe_engine::{
 };
 use otel_arrow_dfe_engine::{Interests, ProducerEffectHandlerExtension};
 use otel_arrow_dfe_otap::{OTAP_PROCESSOR_FACTORIES, pdata::OtapPdata};
-use otel_arrow_dfe_pdata::{OtapPayload, OtlpProtoBytes, PayloadData};
+use otel_arrow_dfe_pdata::OtlpProtoBytes;
 use otel_arrow_dfe_pdata::TryIntoWithOptions;
 use otel_arrow_dfe_pdata::proto::opentelemetry::{
     logs::v1::LogsData,
@@ -334,7 +334,6 @@ impl local::Processor<OtapPdata> for DebugProcessor {
                     );
                 }
 
-
                 // ToDo: handle multiple outputs differently here?
                 if let Some(ports) = main_ports {
                     for port in ports {
@@ -350,17 +349,6 @@ impl local::Processor<OtapPdata> for DebugProcessor {
                 }
 
                 let (_context, payload) = pdata.into_parts();
-
-            
-                match &payload.data() {
-                    PayloadData::OtapArrowRecords(_) => {
-                        println!("GOT ARROW")
-                    }
-                    _ => {
-                        println!("GOT OTLP")
-                    }
-                };
-
                 let otlp_bytes: OtlpProtoBytes = payload.try_into_with_default()?;
 
                 match otlp_bytes {

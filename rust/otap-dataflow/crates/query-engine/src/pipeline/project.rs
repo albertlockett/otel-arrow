@@ -169,12 +169,9 @@ impl Projection {
                         return false;
                     }
 
-                    let struct_col = struct_index.and_then(|i| {
-                        // TODO - for extra extra safety here, we could use .get() instead of indexing
-                        (&projection_cols.columns[i])
-                            .as_any()
-                            .downcast_ref::<StructArray>()
-                    });
+                    let struct_col = struct_index
+                        .and_then(|i| projection_cols.columns.get(i))
+                        .and_then(|col| col.as_any().downcast_ref::<StructArray>());
 
                     let mut struct_fields = Vec::new();
                     let mut struct_field_defs = Vec::new();
@@ -250,7 +247,7 @@ impl Projection {
             keep
         });
 
-        return true;
+        true
     }
 
     pub fn try_downcast_dicts(fields: &mut [Arc<Field>], columns: &mut [ArrayRef]) -> Result<()> {
