@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, NullArray, RecordBatch, StructArray};
+use arrow::array::{Array, ArrayRef, NullArray, RecordBatch, RecordBatchOptions, StructArray};
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use arrow::error::ArrowError;
@@ -160,9 +160,11 @@ impl Projection {
                 ProjectedSchemaColumn::Root(desired_col_name) => {
                     if let Some((index, _)) = projection_cols.find(desired_col_name) {
                         columns_to_keep |= 1 << index;
+                        println!("here col found {desired_col_name:?} -- {columns_to_keep:?}");
                     } else if default_nulls {
                         // default nulls
-                        columns_to_keep |= projection_cols.fields.len();
+                        columns_to_keep |= 1 << projection_cols.fields.len();
+                        println!("here col not found {desired_col_name:?} -- {columns_to_keep:?}");
                         projection_cols.append_column(
                             Field::new(desired_col_name, DataType::Null, true),
                             Arc::new(NullArray::new(projection_cols.num_rows())),
@@ -172,6 +174,7 @@ impl Projection {
                     };
                 }
                 ProjectedSchemaColumn::Struct(desired_struct_name, desired_struct_fields) => {
+                    println!("Why am I here?");
                     let struct_index = projection_cols.find(desired_struct_name).map(|(i, _)| i);
                     if struct_index.is_none() && !default_nulls {
                         return false;
@@ -245,6 +248,11 @@ impl Projection {
             }
         }
 
+        println!("self.schema = {:#?}", self.schema);
+        println!("columns to keep {columns_to_keep:0b}");
+        println!("schema = {:#?}", projection_cols.fields);
+        println!("----");
+
         let mut index = 0;
         projection_cols.columns.retain(|_| {
             let keep = (columns_to_keep & (1 << index)) != 0;
@@ -288,15 +296,21 @@ impl Projection {
 
 /// Columns and fields that will be operated on by [`Projection`].
 pub(crate) struct ProjectionColumns {
+    num_rows: usize,
     fields: Vec<FieldRef>,
     columns: Vec<ArrayRef>,
 }
 
 impl From<&RecordBatch> for ProjectionColumns {
     fn from(rb: &RecordBatch) -> Self {
+        let num_rows = rb.num_rows();
         let fields = rb.schema_ref().fields().to_vec();
         let columns = rb.columns().to_vec();
-        Self { fields, columns }
+        Self {
+            fields,
+            columns,
+            num_rows,
+        }
     }
 }
 
@@ -304,20 +318,15 @@ impl TryFrom<ProjectionColumns> for RecordBatch {
     type Error = ArrowError;
 
     fn try_from(columns: ProjectionColumns) -> std::result::Result<Self, Self::Error> {
-        // TODO - test to ensure this doesn't fail for empty batch
-        // TODO - what if there's zero columns?
-        RecordBatch::try_new(Arc::new(Schema::new(columns.fields)), columns.columns)
+        RecordBatch::try_new_with_options(
+            Arc::new(Schema::new(columns.fields)),
+            columns.columns,
+            &RecordBatchOptions::new().with_row_count(Some(columns.num_rows)),
+        )
     }
 }
 
 impl ProjectionColumns {
-    fn new() -> Self {
-        Self {
-            columns: Vec::new(),
-            fields: Vec::new(),
-        }
-    }
-
     pub(crate) fn columns(&self) -> &[ArrayRef] {
         &self.columns
     }
@@ -362,8 +371,7 @@ impl ProjectionColumns {
     }
 
     fn num_rows(&self) -> usize {
-        // assume all the columns have the same length
-        self.columns.get(0).map(|col| col.len()).unwrap_or_default()
+        self.num_rows
     }
 }
 

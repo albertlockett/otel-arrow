@@ -224,7 +224,7 @@ pub(super) fn eval_datafusion_expr_value(
 
             // project the source RecordBatch to match the physical expression's expected schema
             let projected_rb = if *scope != DataScope::StaticScalar {
-                match projection.project_with_options(&source_rb, projection_opts)? {
+                match projection.project_with_options(source_rb.as_ref(), projection_opts)? {
                     Some(projected) => projected,
                     None => {
                         // required columns missing
