@@ -166,9 +166,9 @@ impl PipelineStage for FilterPipelineStage {
 
     fn supports_exec_on(&self, record_type: &RecordType) -> bool {
         match record_type {
-            RecordType::Signal => true,
+            RecordType::Signal(_) => true,
             RecordType::Attributes => true,
-            RecordType::Child(ChildRecordKind::DataPoint) => true,
+            RecordType::Child(ChildRecordKind::DataPoint, _) => true,
         }
     }
 }
@@ -5126,6 +5126,7 @@ mod test {
             pipeline_expr,
             PipelineOptions {
                 filter_attribute_keys_case_sensitive: false,
+                ..Default::default()
             },
         );
         let input = otlp_to_otap(&OtlpProtoMessage::Logs(to_logs_data(log_records.clone())));
@@ -5164,6 +5165,7 @@ mod test {
             pipeline_expr,
             PipelineOptions {
                 filter_attribute_keys_case_sensitive: false,
+                ..Default::default()
             },
         );
         let input = otlp_to_otap(&OtlpProtoMessage::Logs(to_logs_data(log_records.clone())));
@@ -5197,6 +5199,7 @@ mod test {
             pipeline_expr,
             PipelineOptions {
                 filter_attribute_keys_case_sensitive: false,
+                ..Default::default()
             },
         );
         let input = otlp_to_otap(&OtlpProtoMessage::Logs(to_logs_data(log_records.clone())));
@@ -5220,6 +5223,7 @@ mod test {
             pipeline_expr,
             PipelineOptions {
                 filter_attribute_keys_case_sensitive: false,
+                ..Default::default()
             },
         );
         let result = pipeline.execute(input).await.unwrap();
@@ -5349,6 +5353,7 @@ mod test {
             pipeline_expr,
             PipelineOptions {
                 filter_attribute_keys_case_sensitive: false,
+                ..Default::default()
             },
         );
         let input = otlp_to_otap(&OtlpProtoMessage::Logs(to_logs_data(log_records.clone())));
@@ -5384,6 +5389,7 @@ mod test {
             pipeline_expr,
             PipelineOptions {
                 filter_attribute_keys_case_sensitive: false,
+                ..Default::default()
             },
         );
         let input = otlp_to_otap(&OtlpProtoMessage::Logs(to_logs_data(log_records.clone())));

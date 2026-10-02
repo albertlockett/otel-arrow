@@ -50,7 +50,8 @@ use crate::error::{Error, Result};
 use crate::pipeline::assign::leaf_requires_dict_downcast;
 use crate::pipeline::expr::join::is_one_to_many;
 use crate::pipeline::expr::types::{
-    ExprLogicalType, cast_expr, coerce_arithmetic, nested_struct_field_type, root_field_type,
+    ExprLogicalType, attribute_field_type, cast_expr, coerce_arithmetic, data_point_field_type,
+    nested_struct_field_type, root_field_type,
 };
 use crate::pipeline::expr::{
     ChildRecordKind, DataScope, LeafEval, RecordScope, RootParentStruct, ScopedExpr,
@@ -102,7 +103,7 @@ impl ExprPlanner {
     /// should return the record scope identifying this data.
     fn record_scope(&self) -> RecordScope {
         match &self.record_type {
-            RecordType::Child(child) => match child {
+            RecordType::Child(child, _) => match child {
                 ChildRecordKind::DataPoint => RecordScope::Child(ChildRecordKind::DataPoint),
             },
             // In attributes mode the attributes batch IS the "root" for evaluation,
@@ -125,14 +126,39 @@ impl ExprPlanner {
 
                 match column_accessor {
                     ColumnAccessor::ColumnName(column_name) => {
-                        let field_type = root_field_type(&column_name).ok_or_else(|| {
-                            Error::InvalidPipelineError {
-                                cause: format!("unknown field {column_name} on record batch"),
-                                query_location: Some(
-                                    source_scalar_expr.get_query_location().clone(),
-                                ),
+                        let query_loc = source_scalar_expr.get_query_location().clone();
+                        let field_type = match &self.record_type {
+                            RecordType::Signal(ctx) => root_field_type(&column_name, ctx)
+                                .map_err(|e| Error::InvalidPipelineError {
+                                    cause: e.to_string(),
+                                    query_location: Some(query_loc.clone()),
+                                })?
+                                .ok_or_else(|| Error::InvalidPipelineError {
+                                    cause: format!("unknown field {column_name} on record batch"),
+                                    query_location: Some(query_loc.clone()),
+                                })?,
+                            RecordType::Child(ChildRecordKind::DataPoint, dp_ctx) => {
+                                data_point_field_type(&column_name, dp_ctx)
+                                    .map_err(|e| Error::InvalidPipelineError {
+                                        cause: e.to_string(),
+                                        query_location: Some(query_loc.clone()),
+                                    })?
+                                    .ok_or_else(|| Error::InvalidPipelineError {
+                                        cause: format!(
+                                            "unknown field {column_name} on data point batch"
+                                        ),
+                                        query_location: Some(query_loc.clone()),
+                                    })?
                             }
-                        })?;
+                            RecordType::Attributes => attribute_field_type(&column_name)
+                                .ok_or_else(|| Error::InvalidPipelineError {
+                                    cause: format!(
+                                        "{column_name} is not a valid field on attributes; \
+                                             only 'key' and 'value' are available"
+                                    ),
+                                    query_location: Some(query_loc.clone()),
+                                })?,
+                        };
                         Ok(PlannedOp {
                             expr: ScopedExpr::Eval {
                                 scope: DataScope::Record(self.record_scope()),
@@ -1628,7 +1654,7 @@ impl ExprPlanner {
                 Operator::Eq,
                 ScalarExpression::Static(StaticScalarExpression::String(typename_expr)),
             ) => {
-                if let RecordType::Child(child_kind) = &self.record_type {
+                if let RecordType::Child(child_kind, _) = &self.record_type {
                     return Err(Error::NotYetSupportedError {
                         message: format!(
                             "Checking record type for {child_kind:?} not yet supported"
@@ -2081,7 +2107,7 @@ impl ScopedExpr {
 
                 if *align_children_to_record {
                     let record_scope = match record_type {
-                        RecordType::Child(child) => RecordScope::Child(*child),
+                        RecordType::Child(child, _) => RecordScope::Child(*child),
                         _ => RecordScope::Signal,
                     };
                     return Ok(Cow::Owned(DataScope::Record(record_scope)));
@@ -2131,7 +2157,7 @@ impl ScopedExpr {
             }
             Self::BitmapAnd(_, _) | Self::BitmapOr(_, _) | Self::BitmapNot(_) => {
                 let record_scope = match record_type {
-                    RecordType::Child(child_kind) => RecordScope::Child(*child_kind),
+                    RecordType::Child(child_kind, _) => RecordScope::Child(*child_kind),
                     _ => RecordScope::Signal,
                 };
                 Ok(Cow::Owned(DataScope::Record(record_scope)))
@@ -2479,7 +2505,7 @@ mod test {
     use crate::pipeline::expr::eval::EvalContext;
     use crate::pipeline::expr::{DataScope, ScopedExpr, ShortCircuitStrategy};
     use crate::pipeline::id_mask::IdMask;
-    use crate::pipeline::planner::AttributesIdentifier;
+    use crate::pipeline::planner::{AttributesIdentifier, SignalContext, SignalKind};
 
     fn ql() -> QueryLocation {
         QueryLocation::new_fake()
@@ -2548,7 +2574,10 @@ mod test {
 
     #[test]
     fn test_plan_column_reference() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
         let expr = make_column_expr("severity_text");
         let planned = planner.plan_scalar(&expr, &[]).unwrap();
 
@@ -2581,7 +2610,10 @@ mod test {
 
     #[test]
     fn test_plan_attribute_access() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
         let expr = make_attr_expr("x");
         let planned = planner.plan_scalar(&expr, &[]).unwrap();
 
@@ -2619,7 +2651,10 @@ mod test {
 
     #[test]
     fn test_plan_static_literal() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
         let expr = make_int_literal(42);
         let planned = planner.plan_scalar(&expr, &[]).unwrap();
 
@@ -2651,7 +2686,10 @@ mod test {
             BinaryMathematicalScalarExpression, MathScalarExpression,
         };
 
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
         let left = make_column_expr("severity_number");
         let right = make_int_literal(2);
         let binary = BinaryMathematicalScalarExpression::new(ql(), left, right);
@@ -2694,7 +2732,10 @@ mod test {
             BinaryMathematicalScalarExpression, MathScalarExpression,
         };
 
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
         let left = make_column_expr("severity_number");
         let right = make_attr_expr("x");
         let binary = BinaryMathematicalScalarExpression::new(ql(), left, right);
@@ -2708,7 +2749,10 @@ mod test {
 
     #[test]
     fn test_plan_same_scope_comparison() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
         let left = make_column_expr("severity_text");
         let right = make_string_literal("WARN");
 
@@ -2746,7 +2790,10 @@ mod test {
 
     #[test]
     fn test_plan_and_two_root_predicates() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // severity_text == "WARN" AND severity_number > 10
         let left_eq = LogicalExpression::EqualTo(EqualToLogicalExpression::new(
@@ -2795,7 +2842,10 @@ mod test {
 
     #[test]
     fn test_plan_signal_type_check() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         let get_record_type =
             ScalarExpression::GetRecordType(GetRecordTypeScalarExpression::new(ql()));
@@ -2827,7 +2877,10 @@ mod test {
 
     #[test]
     fn test_plan_scalar_logical() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // Logical(severity_text == "WARN") as a scalar expression
         let inner = LogicalExpression::EqualTo(EqualToLogicalExpression::new(
@@ -2863,7 +2916,10 @@ mod test {
 
     #[test]
     fn test_plan_not() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         let inner = LogicalExpression::EqualTo(EqualToLogicalExpression::new(
             ql(),
@@ -2900,7 +2956,10 @@ mod test {
 
     #[test]
     fn test_plan_fused_attr_eq_string() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // attributes["x"] == "a"
         let attr_expr = make_attr_expr("x");
@@ -2940,7 +2999,10 @@ mod test {
 
     #[test]
     fn test_plan_fused_attr_eq_literal_on_left() {
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // "a" == attributes["x"] (literal on left)
         let literal_expr = make_string_literal("a");
@@ -2999,7 +3061,10 @@ mod test {
         ]);
         let otap = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
 
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // attributes["count"] > 7
         let attr_expr = make_attr_expr("count");
@@ -3040,7 +3105,10 @@ mod test {
         // attributes["x"] == "a" AND attributes["x"] == "a" (same key, same value)
         // Both should use fused paths and then BitmapAnd combines them
 
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         let left = LogicalExpression::EqualTo(EqualToLogicalExpression::new(
             ql(),
@@ -3102,7 +3170,10 @@ mod test {
         ]);
         let otap = otlp_to_otap(&OtlpProtoMessage::Logs(logs));
 
-        let planner = ExprPlanner::new(false, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            false,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // attributes["num"] + 2 > 5
         let attr_expr = make_attr_expr("num");
@@ -3155,7 +3226,10 @@ mod test {
     /// the left child is all-false.
     #[test]
     fn test_plan_cross_scope_and_has_short_circuit_strategy() {
-        let planner = ExprPlanner::new(true, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            true,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // severity_text == "WARN" AND attributes["x"] == "a"
         // Root scope vs Attribute scope -> cross-scope -> JoinAndEval
@@ -3199,7 +3273,10 @@ mod test {
     /// the left child is all-true.
     #[test]
     fn test_plan_cross_scope_or_has_short_circuit_strategy() {
-        let planner = ExprPlanner::new(true, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            true,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // severity_text == "WARN" OR attributes["x"] == "a"
         // Root scope vs Attribute scope -> cross-scope -> JoinAndEval
@@ -3246,7 +3323,10 @@ mod test {
             BinaryMathematicalScalarExpression, MathScalarExpression,
         };
 
-        let planner = ExprPlanner::new(true, RecordType::Signal);
+        let planner = ExprPlanner::new(
+            true,
+            RecordType::Signal(SignalContext::Single(SignalKind::Logs)),
+        );
 
         // severity_number + attributes["x"]
         let binary = BinaryMathematicalScalarExpression::new(

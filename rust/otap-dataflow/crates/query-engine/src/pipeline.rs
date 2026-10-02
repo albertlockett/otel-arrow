@@ -42,6 +42,9 @@ pub mod partition;
 pub mod routing;
 pub mod state;
 
+// Re-export planner types that callers need for configuring pipeline options.
+pub use planner::{SignalContext, SignalKind};
+
 #[cfg(feature = "bench")]
 #[doc(hidden)]
 pub mod bench_support {
@@ -127,7 +130,7 @@ pub trait PipelineStage {
     /// should also implement `execute_on_attributes`. Likewise for `RecordType::Child(DataPoint)`
     /// and `execute_on_metric_data_points`.
     fn supports_exec_on(&self, record_type: &RecordType) -> bool {
-        matches!(record_type, RecordType::Signal)
+        matches!(record_type, RecordType::Signal(_))
     }
 
     /// When pipeline stages execute within the context of a conditional branch, they will only see
@@ -282,12 +285,17 @@ impl PlannedPipeline {
 pub struct PipelineOptions {
     /// Whether to treat attribute key match as case sensitive during filtering stages
     pub filter_attribute_keys_case_sensitive: bool,
+
+    /// Which signal types the pipeline may encounter, derived from the query source keyword.
+    /// Used during planning to validate field references against the signal type context.
+    pub signal_context: SignalContext,
 }
 
 impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             filter_attribute_keys_case_sensitive: true,
+            signal_context: SignalContext::All,
         }
     }
 }
@@ -306,23 +314,59 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// Create a new [`Pipeline`] instance that will evaluate the passed [`PipelineExpression`]
+    /// Create a new [`Pipeline`] instance that will evaluate the passed [`PipelineExpression`].
+    ///
+    /// The signal context is automatically inferred from the query source keyword
+    /// (e.g. `logs`, `metrics`, `traces`, `signals`).
     #[must_use]
     pub fn new(pipeline_definition: PipelineExpression) -> Self {
-        Self::new_with_options(pipeline_definition, PipelineOptions::default())
+        let signal_context = Self::infer_signal_context(&pipeline_definition);
+        let options = PipelineOptions {
+            signal_context,
+            ..Default::default()
+        };
+        Self::new_with_options(pipeline_definition, options)
     }
 
     /// Create a new [`Pipeline`] instance that will evaluate the passed [`PipelineExpression`]
-    /// with the specified options
+    /// with the specified options.
+    ///
+    /// If `options.signal_context` is `SignalContext::All` and the query source keyword
+    /// indicates a specific signal type, the signal context is automatically narrowed.
     #[must_use]
-    pub const fn new_with_options(
+    pub fn new_with_options(
         pipeline_definition: PipelineExpression,
-        options: PipelineOptions,
+        mut options: PipelineOptions,
     ) -> Self {
+        // Auto-infer signal context if not explicitly set
+        if matches!(options.signal_context, SignalContext::All) {
+            options.signal_context = Self::infer_signal_context(&pipeline_definition);
+        }
         Self {
             pipeline_definition,
             planned_pipeline: None,
             options,
+        }
+    }
+
+    /// Infer the signal context from the query source keyword in the pipeline expression.
+    fn infer_signal_context(pipeline_def: &PipelineExpression) -> SignalContext {
+        let query = pipeline_def.get_query();
+        let trimmed = query.trim_start();
+        if trimmed.starts_with("logs") {
+            SignalContext::Single(SignalKind::Logs)
+        } else if trimmed.starts_with("traces") {
+            SignalContext::Single(SignalKind::Traces)
+        } else if trimmed.starts_with("metrics")
+            || trimmed.starts_with("gauges")
+            || trimmed.starts_with("sums")
+            || trimmed.starts_with("histograms")
+            || trimmed.starts_with("exponential_histograms")
+            || trimmed.starts_with("summaries")
+        {
+            SignalContext::Single(SignalKind::Metrics)
+        } else {
+            SignalContext::All
         }
     }
 
@@ -359,7 +403,10 @@ impl Pipeline {
         // lazily plan the pipeline if have not already done so
         if self.planned_pipeline.is_none() {
             let session_ctx = Self::create_session_context();
-            let planner = PipelinePlanner::new().with_filter_attribute_keys_case_sensitive(
+            let planner = PipelinePlanner::new_with_record_type(RecordType::Signal(
+                self.options.signal_context.clone(),
+            ))
+            .with_filter_attribute_keys_case_sensitive(
                 self.options.filter_attribute_keys_case_sensitive,
             );
             let stages =
@@ -463,7 +510,11 @@ mod test {
         logs_data: LogsData,
     ) -> LogsData {
         let otap_batch = otlp_to_otap(&OtlpProtoMessage::Logs(logs_data));
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let options = PipelineOptions {
+            signal_context: SignalContext::Single(SignalKind::Logs),
+            ..Default::default()
+        };
+        let mut pipeline = Pipeline::new_with_options(pipeline_expr, options);
         let result = pipeline.execute(otap_batch).await.unwrap();
         otap_to_logs_data(result)
     }

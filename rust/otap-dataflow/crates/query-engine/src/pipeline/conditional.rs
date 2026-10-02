@@ -347,7 +347,7 @@ impl PipelineStage for ConditionalPipelineStage {
     }
 
     fn supports_exec_on(&self, record_type: &RecordType) -> bool {
-        matches!(record_type, RecordType::Attributes | RecordType::Signal)
+        matches!(record_type, RecordType::Attributes | RecordType::Signal(_))
     }
 }
 
@@ -923,6 +923,7 @@ mod test {
             pipeline_expr,
             PipelineOptions {
                 filter_attribute_keys_case_sensitive: false,
+                ..Default::default()
             },
         );
 

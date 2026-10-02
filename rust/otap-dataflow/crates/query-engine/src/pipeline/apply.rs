@@ -191,7 +191,18 @@ mod test {
     };
     use otel_arrow_dfe_query_engine_languages::opl::parser::OplParser;
 
-    use crate::pipeline::{Pipeline, planner::PipelinePlanner, test::exec_logs_pipeline};
+    use crate::pipeline::{
+        Pipeline,
+        planner::{PipelinePlanner, RecordType, SignalContext, SignalKind},
+        test::exec_logs_pipeline,
+    };
+
+    /// Create a planner for log signal pipelines (used in tests).
+    fn logs_planner() -> PipelinePlanner {
+        PipelinePlanner::new_with_record_type(RecordType::Signal(SignalContext::Single(
+            SignalKind::Logs,
+        )))
+    }
 
     mod data_point;
 
@@ -414,7 +425,7 @@ mod test {
                 rename attributes "y" as "x"
             }"#;
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let planner = PipelinePlanner::new();
+        let planner = logs_planner();
 
         let session_ctx = Pipeline::create_session_context();
         let otap_batch = OtapArrowRecords::Logs(Logs::default());
@@ -447,7 +458,7 @@ mod test {
                 }}"
             );
             let pipeline_expr = OplParser::parse(&query).unwrap().pipeline;
-            let planner = PipelinePlanner::new();
+            let planner = logs_planner();
 
             let session_ctx = Pipeline::create_session_context();
             let otap_batch = OtapArrowRecords::Logs(Logs::default());

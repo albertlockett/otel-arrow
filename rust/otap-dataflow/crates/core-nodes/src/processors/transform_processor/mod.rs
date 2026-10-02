@@ -75,7 +75,7 @@ use otel_arrow_dfe_pdata::{
 use otel_arrow_dfe_query_engine::{
     parser::default_parser_options,
     pipeline::{
-        Pipeline, PipelineOptions,
+        Pipeline, PipelineOptions, SignalContext, SignalKind,
         routing::RouterExtType,
         state::{ExecutionCounters, ExecutionState},
     },
@@ -132,6 +132,21 @@ enum SignalScope {
 }
 
 impl SignalScope {
+    /// Convert this signal scope to a `SignalContext` for use during query planning.
+    fn to_signal_context(&self) -> SignalContext {
+        match self {
+            Self::All => SignalContext::All,
+            Self::Signal(signal_type) => {
+                let kind = match signal_type {
+                    SignalType::Logs => SignalKind::Logs,
+                    SignalType::Metrics => SignalKind::Metrics,
+                    SignalType::Traces => SignalKind::Traces,
+                };
+                SignalContext::Single(kind)
+            }
+        }
+    }
+
     fn try_from_kql_query(query: &str) -> Result<Self, ConfigError> {
         // Current logic looks at the start of the pipeline and expects it to be in a form like
         // "logs | ..." or "traces | ...", etc.
@@ -201,9 +216,7 @@ impl TransformProcessor {
         };
         let parser_options = default_parser_options();
 
-        let pipeline_options = PipelineOptions {
-            filter_attribute_keys_case_sensitive: config.filter_attribute_keys_case_sensitive,
-        };
+        let filter_attribute_keys_case_sensitive = config.filter_attribute_keys_case_sensitive;
 
         let (transforms, language) = match &config.query {
             Query::KqlQuery(query) => {
@@ -213,6 +226,10 @@ impl TransformProcessor {
                 let signal_scope = SignalScope::try_from_kql_query(
                     pipeline_expr.get_query_slice(pipeline_expr.get_query_location()),
                 )?;
+                let pipeline_options = PipelineOptions {
+                    filter_attribute_keys_case_sensitive,
+                    signal_context: signal_scope.to_signal_context(),
+                };
                 (
                     vec![Transform {
                         pipeline: Pipeline::new_with_options(pipeline_expr, pipeline_options),
@@ -228,6 +245,10 @@ impl TransformProcessor {
                 let signal_scope = SignalScope::try_from_opl_query(
                     pipeline_expr.get_query_slice(pipeline_expr.get_query_location()),
                 )?;
+                let pipeline_options = PipelineOptions {
+                    filter_attribute_keys_case_sensitive,
+                    signal_context: signal_scope.to_signal_context(),
+                };
                 (
                     vec![Transform {
                         pipeline: Pipeline::new_with_options(pipeline_expr, pipeline_options),
@@ -245,11 +266,12 @@ impl TransformProcessor {
                                 .map_err(map_parser_err)?
                                 .pipeline;
 
+                        let pipeline_options = PipelineOptions {
+                            filter_attribute_keys_case_sensitive,
+                            signal_context: SignalContext::Single(SignalKind::Logs),
+                        };
                         transforms.push(Transform {
-                            pipeline: Pipeline::new_with_options(
-                                pipeline_expr,
-                                pipeline_options.clone(),
-                            ),
+                            pipeline: Pipeline::new_with_options(pipeline_expr, pipeline_options),
                             signal_scope: SignalScope::Signal(SignalType::Logs),
                         })
                     }
@@ -1666,10 +1688,13 @@ mod test {
 
     #[test]
     fn test_signal_scope_all() {
-        // test ensure it will only operate on all signals
+        // Test that a signals pipeline with a smart-cast narrows correctly.
+        // Uses `if (is Metric) / if (is Span)` to filter by name which is valid for
+        // both metrics and traces but not common to all signal types.
         let runtime = TestRuntime::<OtapPdata>::new();
-        let query = "signals | where name == \"foo\"";
-        let processor = try_create_with_kql_query(query, &runtime).expect("created processor");
+        let query = "signals | if (is Metric) { where name == \"foo\" } \
+                     | if (is Span) { where name == \"foo\" }";
+        let processor = try_create_with_opl_query(query, &runtime).expect("created processor");
         runtime
             .set_processor(processor)
             .run_test(|mut ctx| async move {
