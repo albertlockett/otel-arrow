@@ -56,7 +56,7 @@ use crate::pipeline::project::{Projection, ProjectionOptions};
 use otel_arrow_dfe_pdata::otap::filter::IdBitmapPool;
 
 /// Context for evaluating [`ScopedExpr`]
-pub(crate) struct EvalContext<'a> {
+pub struct EvalContext<'a> {
     /// When evaluating a [`ScopedExpr`] and encountering a data scope identifying the source
     /// as a metric data point, this will be used to determine which record batch is that which
     /// should be used.
@@ -649,7 +649,7 @@ fn evaluate_with_anyval_partitions(
 }
 
 /// Resolve the `ArrowPayloadType` for an attribute scope identifier.
-pub(crate) fn resolve_attrs_payload_type(
+pub fn resolve_attrs_payload_type(
     attrs_id: &AttributesIdentifier,
     otap_batch: &OtapArrowRecords,
     eval_ctx: &EvalContext<'_>,
@@ -675,7 +675,7 @@ pub(crate) fn resolve_attrs_payload_type(
 ///
 /// For root-scoped values, this looks up `scope_ids` and `resource_ids` from the root batch.
 /// For other scopes, these fields are left as `None`.
-pub(crate) fn scoped_value_to_join_input(
+pub fn scoped_value_to_join_input(
     sv: ScopedValue,
     otap_batch: &OtapArrowRecords,
 ) -> Result<JoinInput> {
@@ -979,7 +979,7 @@ fn selection_vec_from_id_iter<I: ExactSizeIterator<Item = Option<u32>>>(
 ///
 /// A non-empty `path` projects scalar leaves from serialized values instead. Rows whose path is
 /// missing, crosses an incompatible container, or resolves to null or a container are omitted.
-fn project_attrs(
+pub fn project_attrs(
     record_batch: &RecordBatch,
     key: &str,
     path: &[SerializedValuePathElement],
@@ -1239,7 +1239,7 @@ fn maybe_downcast_dicts(batch: RecordBatch, opts: &ProjectionOptions) -> Result<
 
 /// Converts the row order of the passed value to match the record batch associated with
 /// the attributes identifier.
-fn align_attrs_to_record(
+pub fn align_attrs_to_record(
     value: ScopedValue,
     attrs_id: AttributesIdentifier,
     otap_batch: &OtapArrowRecords,
@@ -1279,7 +1279,7 @@ fn align_attrs_to_record(
 /// The value may have been computed from attributes, or a scalar, or some other expression
 /// will have the row order based on the computation input. This method realigns the rows so
 /// that they match the record row order by invoking join.
-pub(crate) fn align_value_to_record(
+pub fn align_value_to_record(
     value: ScopedValue,
     record_scope: RecordScope,
     record_rb: &RecordBatch,

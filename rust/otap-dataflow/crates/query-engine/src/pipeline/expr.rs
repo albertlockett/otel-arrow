@@ -57,26 +57,29 @@ use crate::pipeline::planner::{AttributesIdentifier, ColumnAccessor, RecordType}
 use crate::pipeline::project::{Projection, ProjectionOptions};
 
 mod bitmap;
-pub(crate) mod eval;
-pub(crate) mod join;
+#[allow(missing_docs)]
+pub mod eval;
+#[allow(missing_docs)]
+pub mod join;
 pub(crate) mod planner;
-pub(crate) mod types;
+#[allow(missing_docs)]
+pub mod types;
 
-pub(crate) const VALUE_COLUMN_NAME: &str = "value";
+pub const VALUE_COLUMN_NAME: &str = "value";
 
 /// Returns a column name for a multi-join argument at the given index.
 ///
 /// Used when function arguments come from different data scopes and need to be joined
 /// before the function can be evaluated. Each argument in the join result gets a column
 /// named "arg_0", "arg_1", etc.
-pub(crate) fn arg_column_name(index: usize) -> String {
+pub fn arg_column_name(index: usize) -> String {
     format!("arg_{index}")
 }
 
 /// Identifies the scope of data when an expression is evaluating on an element of the stream of
 /// the records.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum RecordScope {
+pub enum RecordScope {
     /// The Root OTAP [`RecordBatch`] (Log, Metric, Span)
     Signal,
 
@@ -94,7 +97,7 @@ pub enum ChildRecordKind {
 
 /// Identifies which root-level parent struct column a [`DataScope::RootParent`] belongs to.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum RootParentStruct {
+pub enum RootParentStruct {
     Resource,
     Scope,
 }
@@ -106,7 +109,7 @@ pub(crate) enum RootParentStruct {
 /// the record batch, and which rows may have been selected from it.
 ///
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum DataScope {
+pub enum DataScope {
     /// Main telemetry batch (e.g., Logs with columns like severity_number, severity_text)
     Record(RecordScope),
 
@@ -210,7 +213,7 @@ impl DataScope {
 /// evaluation based on the results of one side of the expression, which may avoid costly and
 /// unnecessary evaluation of the other-side
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShortCircuitStrategy {
+pub enum ShortCircuitStrategy {
     /// AND semantics: short-circuit to all-false when any child evaluates to all-false
     And,
 
@@ -335,7 +338,7 @@ impl ShortCircuitStrategy {
 /// The dual-mode design allows chains of boolean operations to stay in ID bitmap space without
 /// materializing intermediate arrays.
 #[derive(Debug)]
-pub(crate) enum ScopedExpr {
+pub enum ScopedExpr {
     /// Leaf: evaluate an expression on a specific data scope (RecordBatch).
     ///
     /// For `LeafEval::DatafusionExpr`, this reads from the scope's RecordBatch and evaluates a
@@ -393,7 +396,7 @@ pub(crate) enum ScopedExpr {
 ///
 /// This is the result type for [`ScopedExpr::execute_as_value`].
 #[derive(Debug)]
-pub(crate) struct ScopedValue {
+pub struct ScopedValue {
     /// The computed values, either a columnar array or a scalar.
     pub values: ColumnarValue,
 
@@ -435,7 +438,7 @@ impl ScopedValue {
 /// Expression evaluation performed at the root of the `ScopedExpr` expression tree, e.g. where
 /// the node type will be `Eval` or `JoinAndEval`.
 #[derive(Debug)]
-pub(crate) enum LeafEval {
+pub enum LeafEval {
     /// A standard DataFusion expression, evaluated on the RecordBatch identified by the
     /// enclosing node's scope.
     ///

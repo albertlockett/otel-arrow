@@ -114,7 +114,7 @@ core_affinity = "0.8.3"
 criterion = "0.8.0"
 csv-core = "0.1.13"
 data-encoding = "2.9.0"
-datafusion = { version = "53.0.0", default-features = false }
+datafusion = { version = "54", default-features = false }
 dhat = "0.3.3"
 fluke-hpack = "0.3.1"
 flume = { version = "0.12.0", default-features = false, features = ["async"] }
@@ -180,6 +180,8 @@ pprof = { version = "0.15", features = ["prost-codec"] }
 proc-macro2 = "1.0"
 prometheus = "0.14.0"
 prost = "0.14"
+promql-engine = { git = "https://github.com/thanos-community/promql-rs", branch = "main" }
+promql-parser = { git = "https://github.com/thanos-community/promql-rs", branch = "main" }
 prost-types = "0.14"
 quote = "1.0"
 rand = "0.10.1"
@@ -348,6 +350,7 @@ user-events = ["otel-arrow-dfe-contrib-nodes/user-events"]
 
 # Contrib processors.
 condense-attributes = ["otel-arrow-dfe-contrib-nodes/condense-attributes"]
+promql = ["otel-arrow-dfe-contrib-nodes/promql"]
 recordset-kql = ["otel-arrow-dfe-contrib-nodes/recordset-kql"]
 resource-validator = ["otel-arrow-dfe-contrib-nodes/resource-validator"]
 

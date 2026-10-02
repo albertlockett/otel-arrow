@@ -9049,6 +9049,7 @@ mod test {
                     KeyValue::new("double_attr", AnyValue::new_double(6.2)),
                     KeyValue::new("double_zero", AnyValue::new_double(0.0)),
                     KeyValue::new("str_attr_numeric", AnyValue::new_string("5")),
+                    KeyValue::new("str_attr_numeric_base_2", AnyValue::new_string("0b10110")),
                     KeyValue::new("str_attr_decimal", AnyValue::new_string("6.7")),
                     KeyValue::new("str_attr_bool", AnyValue::new_string("true")),
                     KeyValue::new("str_attr_non_numeric", AnyValue::new_string("hello2")),

@@ -9,6 +9,10 @@ pub mod condense_attributes_processor;
 #[cfg(feature = "recordset-kql")]
 pub mod recordset_kql_processor;
 
+/// PromQL processor for evaluating PromQL queries on metrics
+#[cfg(feature = "promql")]
+pub mod promql_processor;
+
 /// Resource Validator processor for validating resource attributes
 #[cfg(feature = "resource-validator")]
 pub mod resource_validator_processor;

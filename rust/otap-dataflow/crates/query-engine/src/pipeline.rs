@@ -29,12 +29,14 @@ mod assign;
 mod attributes;
 mod concat;
 mod conditional;
-mod expr;
+#[allow(missing_docs)]
+pub mod expr;
 mod filter;
 mod fork;
 mod functions;
 pub(crate) mod id_mask;
-mod planner;
+#[allow(missing_docs)]
+pub mod planner;
 mod project;
 
 pub mod partition;

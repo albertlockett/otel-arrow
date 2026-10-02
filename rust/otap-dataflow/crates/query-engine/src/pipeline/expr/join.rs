@@ -54,19 +54,19 @@ use crate::pipeline::planner::AttributesIdentifier;
 /// Input to the join module, representing an evaluated expression result with its scope
 /// and ID columns needed for joining.
 #[derive(Debug)]
-pub(crate) struct JoinInput {
+pub struct JoinInput {
     /// The computed values.
     pub values: ColumnarValue,
     /// Which scope this data belongs to.
     pub data_scope: Rc<DataScope>,
     /// ID column from the source batch.
-    pub(crate) ids: Option<ArrayRef>,
+    pub ids: Option<ArrayRef>,
     /// Parent ID column from the source batch.
-    pub(crate) parent_ids: Option<ArrayRef>,
+    pub parent_ids: Option<ArrayRef>,
     /// Scope ID column (from root batch's scope.id struct field).
-    pub(crate) scope_ids: Option<ArrayRef>,
+    pub scope_ids: Option<ArrayRef>,
     /// Resource ID column (from root batch's resource.id struct field).
-    pub(crate) resource_ids: Option<ArrayRef>,
+    pub resource_ids: Option<ArrayRef>,
 }
 
 impl JoinInput {
@@ -595,7 +595,7 @@ fn extract_u16_array<'a>(
 ///
 /// This returns the indices that should be taken from the right side to match the row order of
 /// the IDs on the left side.
-fn try_build_simple_join_ids<T: IdJoinLookupType, const PAGE_SIZE: usize>(
+pub fn try_build_simple_join_ids<T: IdJoinLookupType, const PAGE_SIZE: usize>(
     left_ids: &dyn Array,
     right_lookup: &IdJoinLookup<T, PAGE_SIZE>,
 ) -> Result<Int32Array> {
@@ -1675,16 +1675,16 @@ impl JoinExec for AttributesAllSelectionVecJoin {
 ///
 /// Smaller pages keep each allocation L1-cache-friendly, which matters more than
 /// minimizing the number of allocations.
-struct IdJoinLookup<T: IdJoinLookupType, const PAGE_SIZE: usize> {
+pub struct IdJoinLookup<T: IdJoinLookupType, const PAGE_SIZE: usize> {
     pages: Vec<Option<Box<[Option<usize>; PAGE_SIZE]>>>,
     _phantom: PhantomData<T>,
 }
 
-const U16_ID_LOOKUP_PAGE_SIZE: usize = const { 1 << <u16 as IdJoinLookupType>::PAGE_BITS };
-const U32_ID_LOOKUP_PAGE_SIZE: usize = const { 1 << <u32 as IdJoinLookupType>::PAGE_BITS };
+pub const U16_ID_LOOKUP_PAGE_SIZE: usize = const { 1 << <u16 as IdJoinLookupType>::PAGE_BITS };
+pub const U32_ID_LOOKUP_PAGE_SIZE: usize = const { 1 << <u32 as IdJoinLookupType>::PAGE_BITS };
 
-type U16IdJoinLookup = IdJoinLookup<u16, U16_ID_LOOKUP_PAGE_SIZE>;
-type U32IdJoinLookup = IdJoinLookup<u32, U32_ID_LOOKUP_PAGE_SIZE>;
+pub type U16IdJoinLookup = IdJoinLookup<u16, U16_ID_LOOKUP_PAGE_SIZE>;
+pub type U32IdJoinLookup = IdJoinLookup<u32, U32_ID_LOOKUP_PAGE_SIZE>;
 
 impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
     /// Create a new instance from an ID column.
@@ -1692,7 +1692,7 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
     /// Returns an error if the ID column is not either `PrimitiveArray<T>` or  `Dict<u8|u16, T>`
     /// as these are the expected types for ID columns in OTAP. This also returns an error that
     /// the column is missing if id_arr is `None`
-    fn try_new_from_array(ids_arr: &ArrayRef) -> Result<Self> {
+    pub fn try_new_from_array(ids_arr: &ArrayRef) -> Result<Self> {
         if let Some(ids_as_primitive) = ids_arr.as_primitive_opt::<T::ArrowType>() {
             return Ok(Self::new_from_primitive(ids_as_primitive));
         } else if let Some(ids_as_dict) = ids_arr.as_dictionary_opt::<UInt8Type>() {
@@ -1718,7 +1718,7 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
     ///
     /// # Returns
     /// A lookup structure mapping parent_id -> row index. Null values in the array are skipped.
-    fn new_from_primitive(ids: &PrimitiveArray<T::ArrowType>) -> Self {
+    pub fn new_from_primitive(ids: &PrimitiveArray<T::ArrowType>) -> Self {
         Self::new_from_iter::<_>(ids.iter())
     }
 
@@ -1782,7 +1782,7 @@ impl<T: IdJoinLookupType, const PAGE_SIZE: usize> IdJoinLookup<T, PAGE_SIZE> {
 }
 // Helper trait for defining the size of various structures in the IdJoinLookup paged vec.
 #[allow(missing_docs)]
-trait IdJoinLookupType:
+pub trait IdJoinLookupType:
     Copy
     + std::ops::Shr<Output = Self>
     + std::ops::BitAnd<Output = Self>

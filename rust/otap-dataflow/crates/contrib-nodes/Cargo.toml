@@ -63,6 +63,12 @@ http = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 ryu = { workspace = true, optional = true }
 
+# PromQL processor dependencies
+datafusion = { workspace = true, optional = true }
+otel-arrow-dfe-query-engine = { workspace = true, optional = true }
+promql-engine = { workspace = true, optional = true }
+promql-parser = { workspace = true, optional = true }
+
 # ClickHouse exporter dependencies (optional, behind feature flag)
 clickhouse = { workspace = true, optional = true }
 clickhouse-ext-arrow = { workspace = true, optional = true }
@@ -104,6 +110,7 @@ contrib-receivers = [
 ]
 contrib-processors = [
     "condense-attributes",
+    "promql",
     "recordset-kql",
     "resource-validator",
 ]
@@ -149,6 +156,12 @@ recordset-kql = [
     "dep:otel-arrow-contrib-data-engine-recordset",
     "dep:regex",
     "dep:chrono",
+]
+promql = [
+    "dep:datafusion",
+    "dep:otel-arrow-dfe-query-engine",
+    "dep:promql-engine",
+    "dep:promql-parser",
 ]
 resource-validator = []
 
