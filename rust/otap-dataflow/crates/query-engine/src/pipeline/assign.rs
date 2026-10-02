@@ -73,8 +73,8 @@ use crate::pipeline::expr::join::{
 };
 use crate::pipeline::expr::planner::PlannedOp;
 use crate::pipeline::expr::types::{
-    ExprLogicalType, MetricDataPointType, nested_struct_field_type,
-    root_field_supports_dict_encoding, root_field_type, root_field_type_unvalidated,
+    ExprLogicalType, MetricDataPointType, attribute_field_type, nested_struct_field_type,
+    root_field_supports_dict_encoding, root_field_type,
 };
 use crate::pipeline::expr::{
     ChildRecordKind, DataScope, LeafEval, RecordScope, RootParentStruct, ScopedExpr, ScopedValue,
@@ -118,6 +118,9 @@ pub(crate) struct AssignPipelineStage {
 
     /// Unified execution trees that produce the data to be assigned to the destination.
     sources: Vec<ScopedExpr>,
+
+    /// The record type context from planning, used at runtime for field type resolution.
+    record_type: RecordType,
 
     /// When this pipeline stage is used in a nested pipeline that processes attributes, it may be
     /// applying an expression that references the virtual "value" column. This flag will be set if
@@ -199,6 +202,7 @@ impl AssignPipelineStage {
                 .collect(),
             dest_columns,
             sources: source_exprs,
+            record_type: record_type.clone(),
             projection_contains_value_column,
             id_bitmap_pool: IdBitmapPool::new(),
         })
@@ -220,10 +224,14 @@ impl AssignPipelineStage {
             }
         };
 
-        let expected_column_logical_type = root_field_type_unvalidated(dest_column_name)
-            // safety: this will only return None if the destination column does not exist in OTAP
-            // data model, but this has been validated in the constructor of this type, so it's
-            // safe to expect here
+        // safety: the signal context was validated during planning, so root_field_type
+        // should not return Err or Ok(None) for any field that was accepted at plan time.
+        let signal_ctx = self
+            .record_type
+            .signal_context()
+            .expect("assign_to_root called with Signal record type");
+        let expected_column_logical_type = root_field_type(dest_column_name, signal_ctx)
+            .expect("field validated during planning")
             .expect("dest column found");
 
         // AnyValue destinations (e.g., body) need special handling: the result may be a
@@ -1586,7 +1594,7 @@ impl PipelineStage for AssignPipelineStage {
             record_type,
             RecordType::Attributes
                 | RecordType::Signal(_)
-                | RecordType::Child(ChildRecordKind::DataPoint, _)
+                | RecordType::Child(ChildRecordKind::DataPoint, _,)
         )
     }
 
@@ -2174,12 +2182,19 @@ fn validate_assign(
                         cause: format!("cannot assign to non-existent column '{col_name}'"),
                         query_location: dest_query_location.cloned(),
                     })?,
-                _ => root_field_type_unvalidated(col_name).ok_or_else(|| {
-                    Error::InvalidPipelineError {
-                        cause: format!("cannot assign to non-existent column '{col_name}'"),
+                RecordType::Attributes => {
+                    attribute_field_type(col_name).ok_or_else(|| Error::InvalidPipelineError {
+                        cause: format!(
+                            "cannot assign to '{col_name}' in attribute pipeline; \
+                             only 'key' and 'value' are available"
+                        ),
                         query_location: dest_query_location.cloned(),
-                    }
-                })?,
+                    })?
+                }
+                RecordType::Child(_, _) => {
+                    // Data point column assignment is not yet supported
+                    return Ok(());
+                }
             };
 
             let source_type = &source_plan.expr_type;

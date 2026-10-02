@@ -40,6 +40,7 @@ use crate::pipeline::fork::{ForkPipelineStage, ForkPipelineStageBranch};
 use crate::pipeline::routing::RouteToPipelineStage;
 use crate::pipeline::scale_metric::ScaleMetricPipelineStage;
 use crate::pipeline::{BoxedPipelineStage, PipelineStage};
+use otel_arrow_dfe_pdata::otlp::metrics::MetricType;
 
 /// Which signal types may flow through the current pipeline context.
 ///
@@ -62,8 +63,8 @@ pub enum SignalContext {
 pub enum SignalKind {
     /// Log records
     Logs,
-    /// Metric records
-    Metrics,
+    /// Metric records, optionally narrowed to a specific metric type
+    Metrics(MetricTypeContext),
     /// Trace span records
     Traces,
 }
@@ -72,10 +73,24 @@ impl std::fmt::Display for SignalKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Logs => write!(f, "logs"),
-            Self::Metrics => write!(f, "metrics"),
+            Self::Metrics(MetricTypeContext::All) => write!(f, "metrics"),
+            Self::Metrics(MetricTypeContext::Single(mt)) => write!(f, "metrics ({mt:?})"),
             Self::Traces => write!(f, "traces"),
         }
     }
+}
+
+/// Which concrete metric types may flow through a metrics pipeline.
+///
+/// For example, `gauges` narrows to `Single(Gauge)`, while `metrics` gives `All`.
+/// This context is used to derive `DataPointContext` when entering a nested
+/// `apply data_points { ... }` pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetricTypeContext {
+    /// All metric types (gauges, sums, histograms, exponential histograms, summaries)
+    All,
+    /// A single concrete metric type
+    Single(MetricType),
 }
 
 /// Which metric data point types may flow through a data_points pipeline.
@@ -90,6 +105,31 @@ pub enum DataPointContext {
     Single(MetricDataPointType),
 }
 
+impl DataPointContext {
+    /// Derive the data point context from a metric type context.
+    ///
+    /// Each metric type maps to a specific data point type:
+    /// - Gauge/Sum -> NumberDataPoint
+    /// - Histogram -> HistogramDataPoint
+    /// - ExponentialHistogram -> ExponentialHistogramDataPoint
+    /// - Summary -> SummaryDataPoint
+    pub fn from_metric_type_context(ctx: &MetricTypeContext) -> Self {
+        match ctx {
+            MetricTypeContext::All => Self::All,
+            MetricTypeContext::Single(mt) => Self::Single(match mt {
+                MetricType::Gauge | MetricType::Sum => MetricDataPointType::NumberDataPoint,
+                MetricType::Histogram => MetricDataPointType::HistogramDataPoint,
+                MetricType::ExponentialHistogram => {
+                    MetricDataPointType::ExponentialHistogramDataPoint
+                }
+                MetricType::Summary => MetricDataPointType::SummaryDataPoint,
+                // Empty is not a concrete type -- treat as all
+                MetricType::Empty => return Self::All,
+            }),
+        }
+    }
+}
+
 /// Identifier for what will be treated as a record in the pipeline that is being planned.
 ///
 /// Typically this is used in cases where we plan a nested pipeline on some child element
@@ -102,8 +142,12 @@ pub enum RecordType {
     /// Logs, Metrics, Traces -- with context about which signal types are valid
     Signal(SignalContext),
 
-    /// A repeated, child field such as metric data points, with context about
-    /// which data point types are valid
+    /// A repeated, child field such as metric data points.
+    ///
+    /// The `DataPointContext` carries which data point types are valid (only meaningful
+    /// when the child kind is `DataPoint`). It lives here rather than on
+    /// `ChildRecordKind` because `ChildRecordKind` is shared with `RecordScope`
+    /// (a runtime type that does not need validation context).
     Child(ChildRecordKind, DataPointContext),
 
     /// Attributes treated as elements of the stream
@@ -180,12 +224,26 @@ impl PipelinePlanner {
         {
             let narrowed = match typename.get_value() {
                 "Log" => Some(SignalContext::Single(SignalKind::Logs)),
-                "Metric" => Some(SignalContext::Single(SignalKind::Metrics)),
+                "Metric" => Some(SignalContext::Single(SignalKind::Metrics(
+                    MetricTypeContext::All,
+                ))),
                 "Span" => Some(SignalContext::Single(SignalKind::Traces)),
-                // Metric subtypes also imply Metrics signal context
-                "Gauge" | "Sum" | "Histogram" | "ExponentialHistogram" | "Summary" => {
-                    Some(SignalContext::Single(SignalKind::Metrics))
-                }
+                // Metric subtypes narrow to both the signal and metric type
+                "Gauge" => Some(SignalContext::Single(SignalKind::Metrics(
+                    MetricTypeContext::Single(MetricType::Gauge),
+                ))),
+                "Sum" => Some(SignalContext::Single(SignalKind::Metrics(
+                    MetricTypeContext::Single(MetricType::Sum),
+                ))),
+                "Histogram" => Some(SignalContext::Single(SignalKind::Metrics(
+                    MetricTypeContext::Single(MetricType::Histogram),
+                ))),
+                "ExponentialHistogram" => Some(SignalContext::Single(SignalKind::Metrics(
+                    MetricTypeContext::Single(MetricType::ExponentialHistogram),
+                ))),
+                "Summary" => Some(SignalContext::Single(SignalKind::Metrics(
+                    MetricTypeContext::Single(MetricType::Summary),
+                ))),
                 _ => None,
             };
             if let Some(signal_ctx) = narrowed {
@@ -1052,7 +1110,17 @@ impl PipelinePlanner {
                     let nested_pipeline_record_type = match apply_source {
                         ApplySource::Attributes(_) => RecordType::Attributes,
                         ApplySource::DataPoints => {
-                            RecordType::Child(ChildRecordKind::DataPoint, DataPointContext::All)
+                            // Derive the data point context from the current
+                            // signal context. If the pipeline was narrowed to a
+                            // specific metric type (e.g. `gauges`), the data
+                            // point context will be narrowed accordingly.
+                            let dp_ctx = match &self.record_type {
+                                RecordType::Signal(SignalContext::Single(SignalKind::Metrics(
+                                    mt_ctx,
+                                ))) => DataPointContext::from_metric_type_context(mt_ctx),
+                                _ => DataPointContext::All,
+                            };
+                            RecordType::Child(ChildRecordKind::DataPoint, dp_ctx)
                         }
                     };
 
@@ -1393,7 +1461,7 @@ mod test {
 
     use crate::pipeline::{Pipeline, planner::PipelinePlanner};
 
-    use super::{RecordType, SignalContext, SignalKind};
+    use super::{MetricTypeContext, RecordType, SignalContext, SignalKind};
 
     /// Create a planner for log signal pipelines (used in tests).
     fn logs_planner() -> PipelinePlanner {
@@ -1605,7 +1673,7 @@ mod test {
     fn test_rejects_logs_field_in_metrics_pipeline() {
         assert_planning_error_contains(
             "metrics | where severity_number > 0",
-            SignalKind::Metrics,
+            SignalKind::Metrics(MetricTypeContext::All),
             "field 'severity_number' is not valid for metrics pipeline",
         );
     }
@@ -1627,7 +1695,7 @@ mod test {
     fn test_rejects_traces_field_in_metrics_pipeline() {
         assert_planning_error_contains(
             "metrics | where trace_state == \"x\"",
-            SignalKind::Metrics,
+            SignalKind::Metrics(MetricTypeContext::All),
             "field 'trace_state' is not valid for metrics pipeline",
         );
     }
@@ -1649,7 +1717,10 @@ mod test {
     #[test]
     fn test_accepts_common_field_in_all_contexts() {
         assert_planning_ok("logs | where schema_url == \"x\"", SignalKind::Logs);
-        assert_planning_ok("metrics | where schema_url == \"x\"", SignalKind::Metrics);
+        assert_planning_ok(
+            "metrics | where schema_url == \"x\"",
+            SignalKind::Metrics(MetricTypeContext::All),
+        );
         assert_planning_ok("traces | where schema_url == \"x\"", SignalKind::Traces);
     }
 
@@ -1729,7 +1800,10 @@ mod test {
     /// Guarantees: `name` is accepted in metrics and traces, rejected in logs.
     #[test]
     fn test_name_field_valid_for_metrics_and_traces() {
-        assert_planning_ok("metrics | where name == \"x\"", SignalKind::Metrics);
+        assert_planning_ok(
+            "metrics | where name == \"x\"",
+            SignalKind::Metrics(MetricTypeContext::All),
+        );
         assert_planning_ok("traces | where name == \"x\"", SignalKind::Traces);
         assert_planning_error_contains(
             "logs | where name == \"x\"",

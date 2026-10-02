@@ -75,7 +75,7 @@ use otel_arrow_dfe_pdata::{
 use otel_arrow_dfe_query_engine::{
     parser::default_parser_options,
     pipeline::{
-        Pipeline, PipelineOptions, SignalContext, SignalKind,
+        MetricTypeContext, Pipeline, PipelineOptions, SignalContext, SignalKind,
         routing::RouterExtType,
         state::{ExecutionCounters, ExecutionState},
     },
@@ -139,7 +139,7 @@ impl SignalScope {
             Self::Signal(signal_type) => {
                 let kind = match signal_type {
                     SignalType::Logs => SignalKind::Logs,
-                    SignalType::Metrics => SignalKind::Metrics,
+                    SignalType::Metrics => SignalKind::Metrics(MetricTypeContext::All),
                     SignalType::Traces => SignalKind::Traces,
                 };
                 SignalContext::Single(kind)

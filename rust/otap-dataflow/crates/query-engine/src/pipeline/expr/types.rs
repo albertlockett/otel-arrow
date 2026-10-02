@@ -98,6 +98,85 @@ impl ExprLogicalType {
     }
 }
 
+// -- Bitmap-based field membership for signal and data point types --
+//
+// Each signal type and data point type is represented as a bit in a u8.
+// Field validation uses bitwise operations for efficient membership checks.
+
+/// Bitmap of signal types that a field is valid for.
+type SignalMask = u8;
+const SIG_LOGS: SignalMask = 0b001;
+const SIG_METRICS: SignalMask = 0b010;
+const SIG_TRACES: SignalMask = 0b100;
+const SIG_ALL: SignalMask = SIG_LOGS | SIG_METRICS | SIG_TRACES;
+const SIG_LOGS_TRACES: SignalMask = SIG_LOGS | SIG_TRACES;
+const SIG_METRICS_TRACES: SignalMask = SIG_METRICS | SIG_TRACES;
+
+impl SignalKind {
+    /// Return the bitmap for this signal kind (ignoring metric type context).
+    const fn mask(&self) -> SignalMask {
+        match self {
+            Self::Logs => SIG_LOGS,
+            Self::Metrics(_) => SIG_METRICS,
+            Self::Traces => SIG_TRACES,
+        }
+    }
+}
+
+/// Bitmap of data point types that a field is valid for.
+type DpMask = u8;
+const DP_NUMBER: DpMask = 0b0001;
+const DP_HISTOGRAM: DpMask = 0b0010;
+const DP_EXP_HISTOGRAM: DpMask = 0b0100;
+const DP_SUMMARY: DpMask = 0b1000;
+const DP_ALL: DpMask = DP_NUMBER | DP_HISTOGRAM | DP_EXP_HISTOGRAM | DP_SUMMARY;
+const DP_HIST_EXPHIST_SUMMARY: DpMask = DP_HISTOGRAM | DP_EXP_HISTOGRAM | DP_SUMMARY;
+const DP_HIST_EXPHIST: DpMask = DP_HISTOGRAM | DP_EXP_HISTOGRAM;
+
+impl MetricDataPointType {
+    const fn mask(&self) -> DpMask {
+        match self {
+            Self::NumberDataPoint => DP_NUMBER,
+            Self::HistogramDataPoint => DP_HISTOGRAM,
+            Self::ExponentialHistogramDataPoint => DP_EXP_HISTOGRAM,
+            Self::SummaryDataPoint => DP_SUMMARY,
+        }
+    }
+}
+
+/// Produce a human-readable list of signal types from a mask.
+fn signal_mask_description(mask: SignalMask) -> String {
+    let mut parts = Vec::new();
+    if mask & SIG_LOGS != 0 {
+        parts.push("logs");
+    }
+    if mask & SIG_METRICS != 0 {
+        parts.push("metrics");
+    }
+    if mask & SIG_TRACES != 0 {
+        parts.push("traces");
+    }
+    parts.join(", ")
+}
+
+/// Produce a human-readable list of data point types from a mask.
+fn dp_mask_description(mask: DpMask) -> String {
+    let mut parts = Vec::new();
+    if mask & DP_NUMBER != 0 {
+        parts.push("number data points");
+    }
+    if mask & DP_HISTOGRAM != 0 {
+        parts.push("histogram data points");
+    }
+    if mask & DP_EXP_HISTOGRAM != 0 {
+        parts.push("exponential histogram data points");
+    }
+    if mask & DP_SUMMARY != 0 {
+        parts.push("summary data points");
+    }
+    parts.join(", ")
+}
+
 /// Error from field validation when a field is valid in the OTAP data model but not
 /// valid for the current pipeline context (signal type, data point type, or attributes).
 #[derive(Debug)]
@@ -106,24 +185,21 @@ pub enum FieldValidationError {
     InvalidForSignal {
         field: String,
         signal: SignalKind,
-        valid_for: &'static [SignalKind],
+        valid_for: SignalMask,
     },
     /// Field exists but is not common to all signal types (intersection semantics).
     NotCommonToAllSignals {
         field: String,
-        valid_for: &'static [SignalKind],
+        valid_for: SignalMask,
     },
     /// Field exists but is not valid for the data point type(s) in context.
     InvalidForDataPoint {
         field: String,
-        context_desc: String,
-        valid_for: &'static [MetricDataPointType],
+        context: DataPointContext,
+        valid_for: DpMask,
     },
     /// Field is not common to all data point types (intersection semantics).
-    NotCommonToAllDataPoints {
-        field: String,
-        valid_for: &'static [MetricDataPointType],
-    },
+    NotCommonToAllDataPoints { field: String, valid_for: DpMask },
 }
 
 impl fmt::Display for FieldValidationError {
@@ -133,124 +209,38 @@ impl fmt::Display for FieldValidationError {
                 field,
                 signal,
                 valid_for,
-            } => {
-                let valid_strs: Vec<&str> = valid_for.iter().map(SignalKind::as_str).collect();
-                write!(
-                    f,
-                    "field '{field}' is not valid for {signal} pipeline; \
-                     it is only available in {valid}",
-                    valid = valid_strs.join(", "),
-                )
-            }
-            Self::NotCommonToAllSignals { field, valid_for } => {
-                let valid_strs: Vec<&str> = valid_for.iter().map(SignalKind::as_str).collect();
-                write!(
-                    f,
-                    "field '{field}' is not valid in a mixed signals pipeline; \
-                     it is only available in {valid} -- consider using a type-specific source \
-                     or narrowing with 'if (is <Type>) {{ ... }}'",
-                    valid = valid_strs.join(", "),
-                )
-            }
+            } => write!(
+                f,
+                "field '{field}' is not valid for {signal} pipeline; \
+                 it is only available in {valid}",
+                valid = signal_mask_description(*valid_for),
+            ),
+            Self::NotCommonToAllSignals { field, valid_for } => write!(
+                f,
+                "field '{field}' is not valid in a mixed signals pipeline; \
+                 it is only available in {valid} -- consider using a type-specific source \
+                 or narrowing with 'if (is <Type>) {{ ... }}'",
+                valid = signal_mask_description(*valid_for),
+            ),
             Self::InvalidForDataPoint {
                 field,
-                context_desc,
+                context,
                 valid_for,
-            } => {
-                let valid_strs: Vec<&str> =
-                    valid_for.iter().map(MetricDataPointType::as_str).collect();
-                write!(
-                    f,
-                    "field '{field}' is not valid for {context_desc} data points; \
-                     it is only available on {valid}",
-                    valid = valid_strs.join(", "),
-                )
-            }
-            Self::NotCommonToAllDataPoints { field, valid_for } => {
-                let valid_strs: Vec<&str> =
-                    valid_for.iter().map(MetricDataPointType::as_str).collect();
-                write!(
-                    f,
-                    "field '{field}' is not valid for all data point types; \
-                     it is only available on {valid}",
-                    valid = valid_strs.join(", "),
-                )
-            }
+            } => write!(
+                f,
+                "field '{field}' is not valid for {context:?} data points; \
+                 it is only available on {valid}",
+                valid = dp_mask_description(*valid_for),
+            ),
+            Self::NotCommonToAllDataPoints { field, valid_for } => write!(
+                f,
+                "field '{field}' is not valid for all data point types; \
+                 it is only available on {valid}",
+                valid = dp_mask_description(*valid_for),
+            ),
         }
     }
 }
-
-impl SignalKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Logs => "logs",
-            Self::Metrics => "metrics",
-            Self::Traces => "traces",
-        }
-    }
-}
-
-impl MetricDataPointType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::NumberDataPoint => "number data points",
-            Self::HistogramDataPoint => "histogram data points",
-            Self::ExponentialHistogramDataPoint => "exponential histogram data points",
-            Self::SummaryDataPoint => "summary data points",
-        }
-    }
-}
-
-/// Return the type for a root OTAP signal field without signal-context validation.
-///
-/// This is used at runtime when the field has already been validated during planning.
-/// Returns `None` if the field is completely unknown in the OTAP data model.
-pub fn root_field_type_unvalidated(field_name: &str) -> Option<ExprLogicalType> {
-    let (field_type, _valid_for) = match field_name {
-        consts::SCHEMA_URL => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        consts::DROPPED_ATTRIBUTES_COUNT => (ExprLogicalType::UInt32, ALL_SIGNALS_STATIC),
-        consts::TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, ALL_SIGNALS_STATIC),
-        consts::OBSERVED_TIME_UNIX_NANO => {
-            (ExprLogicalType::TimestampNanosecond, ALL_SIGNALS_STATIC)
-        }
-        consts::TRACE_ID => (ExprLogicalType::FixedSizeBinary(16), ALL_SIGNALS_STATIC),
-        consts::SPAN_ID => (ExprLogicalType::FixedSizeBinary(8), ALL_SIGNALS_STATIC),
-        consts::FLAGS => (ExprLogicalType::UInt32, ALL_SIGNALS_STATIC),
-        consts::SEVERITY_NUMBER => (ExprLogicalType::Int32, ALL_SIGNALS_STATIC),
-        consts::SEVERITY_TEXT => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        consts::EVENT_NAME => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        consts::BODY => (ExprLogicalType::AnyValue, ALL_SIGNALS_STATIC),
-        consts::DURATION_TIME_UNIX_NANO => {
-            (ExprLogicalType::DurationNanoSecond, ALL_SIGNALS_STATIC)
-        }
-        consts::TRACE_STATE => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        consts::PARENT_SPAN_ID => (ExprLogicalType::FixedSizeBinary(8), ALL_SIGNALS_STATIC),
-        consts::KIND => (ExprLogicalType::Int32, ALL_SIGNALS_STATIC),
-        consts::DROPPED_EVENTS_COUNT => (ExprLogicalType::UInt32, ALL_SIGNALS_STATIC),
-        consts::DROPPED_LINKS_COUNT => (ExprLogicalType::UInt32, ALL_SIGNALS_STATIC),
-        consts::METRIC_TYPE => (ExprLogicalType::UInt8, ALL_SIGNALS_STATIC),
-        consts::NAME => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        consts::DESCRIPTION => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        consts::UNIT => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        consts::AGGREGATION_TEMPORALITY => (ExprLogicalType::Int32, ALL_SIGNALS_STATIC),
-        VALUE_COLUMN_NAME => (ExprLogicalType::AnyValue, ALL_SIGNALS_STATIC),
-        consts::ATTRIBUTE_KEY => (ExprLogicalType::String, ALL_SIGNALS_STATIC),
-        _ => return None,
-    };
-    Some(field_type)
-}
-
-// Placeholder to keep the match arms consistent (unused second element).
-const ALL_SIGNALS_STATIC: &[SignalKind] = ALL_SIGNALS;
-
-use SignalKind::{Logs, Metrics, Traces};
-
-const ALL_SIGNALS: &[SignalKind] = &[Logs, Metrics, Traces];
-const LOGS_ONLY: &[SignalKind] = &[Logs];
-const TRACES_ONLY: &[SignalKind] = &[Traces];
-const METRICS_ONLY: &[SignalKind] = &[Metrics];
-const LOGS_TRACES: &[SignalKind] = &[Logs, Traces];
-const METRICS_TRACES: &[SignalKind] = &[Metrics, Traces];
 
 /// Return the type and signal-kind scope for a root OTAP signal field.
 ///
@@ -264,38 +254,38 @@ pub fn root_field_type(
 ) -> Result<Option<ExprLogicalType>, FieldValidationError> {
     let (field_type, valid_for) = match field_name {
         // fields common to all signal types
-        consts::SCHEMA_URL => (ExprLogicalType::String, ALL_SIGNALS),
-        consts::DROPPED_ATTRIBUTES_COUNT => (ExprLogicalType::UInt32, ALL_SIGNALS),
+        consts::SCHEMA_URL => (ExprLogicalType::String, SIG_ALL),
+        consts::DROPPED_ATTRIBUTES_COUNT => (ExprLogicalType::UInt32, SIG_ALL),
 
         // logs + traces common fields
-        consts::TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, LOGS_TRACES),
-        consts::OBSERVED_TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, LOGS_TRACES),
-        consts::TRACE_ID => (ExprLogicalType::FixedSizeBinary(16), LOGS_TRACES),
-        consts::SPAN_ID => (ExprLogicalType::FixedSizeBinary(8), LOGS_TRACES),
-        consts::FLAGS => (ExprLogicalType::UInt32, LOGS_TRACES),
+        consts::TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, SIG_LOGS_TRACES),
+        consts::OBSERVED_TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, SIG_LOGS_TRACES),
+        consts::TRACE_ID => (ExprLogicalType::FixedSizeBinary(16), SIG_LOGS_TRACES),
+        consts::SPAN_ID => (ExprLogicalType::FixedSizeBinary(8), SIG_LOGS_TRACES),
+        consts::FLAGS => (ExprLogicalType::UInt32, SIG_LOGS_TRACES),
 
         // logs-only fields
-        consts::SEVERITY_NUMBER => (ExprLogicalType::Int32, LOGS_ONLY),
-        consts::SEVERITY_TEXT => (ExprLogicalType::String, LOGS_ONLY),
-        consts::EVENT_NAME => (ExprLogicalType::String, LOGS_ONLY),
-        consts::BODY => (ExprLogicalType::AnyValue, LOGS_ONLY),
+        consts::SEVERITY_NUMBER => (ExprLogicalType::Int32, SIG_LOGS),
+        consts::SEVERITY_TEXT => (ExprLogicalType::String, SIG_LOGS),
+        consts::EVENT_NAME => (ExprLogicalType::String, SIG_LOGS),
+        consts::BODY => (ExprLogicalType::AnyValue, SIG_LOGS),
 
         // traces-only fields
-        consts::DURATION_TIME_UNIX_NANO => (ExprLogicalType::DurationNanoSecond, TRACES_ONLY),
-        consts::TRACE_STATE => (ExprLogicalType::String, TRACES_ONLY),
-        consts::PARENT_SPAN_ID => (ExprLogicalType::FixedSizeBinary(8), TRACES_ONLY),
-        consts::KIND => (ExprLogicalType::Int32, TRACES_ONLY),
-        consts::DROPPED_EVENTS_COUNT => (ExprLogicalType::UInt32, TRACES_ONLY),
-        consts::DROPPED_LINKS_COUNT => (ExprLogicalType::UInt32, TRACES_ONLY),
+        consts::DURATION_TIME_UNIX_NANO => (ExprLogicalType::DurationNanoSecond, SIG_TRACES),
+        consts::TRACE_STATE => (ExprLogicalType::String, SIG_TRACES),
+        consts::PARENT_SPAN_ID => (ExprLogicalType::FixedSizeBinary(8), SIG_TRACES),
+        consts::KIND => (ExprLogicalType::Int32, SIG_TRACES),
+        consts::DROPPED_EVENTS_COUNT => (ExprLogicalType::UInt32, SIG_TRACES),
+        consts::DROPPED_LINKS_COUNT => (ExprLogicalType::UInt32, SIG_TRACES),
 
         // metrics-only fields
-        consts::METRIC_TYPE => (ExprLogicalType::UInt8, METRICS_ONLY),
-        consts::DESCRIPTION => (ExprLogicalType::String, METRICS_ONLY),
-        consts::UNIT => (ExprLogicalType::String, METRICS_ONLY),
-        consts::AGGREGATION_TEMPORALITY => (ExprLogicalType::Int32, METRICS_ONLY),
+        consts::METRIC_TYPE => (ExprLogicalType::UInt8, SIG_METRICS),
+        consts::DESCRIPTION => (ExprLogicalType::String, SIG_METRICS),
+        consts::UNIT => (ExprLogicalType::String, SIG_METRICS),
+        consts::AGGREGATION_TEMPORALITY => (ExprLogicalType::Int32, SIG_METRICS),
 
         // metrics + traces shared fields
-        consts::NAME => (ExprLogicalType::String, METRICS_TRACES),
+        consts::NAME => (ExprLogicalType::String, SIG_METRICS_TRACES),
 
         // attribute-mode virtual columns -- not valid in signal context
         VALUE_COLUMN_NAME | consts::ATTRIBUTE_KEY => return Ok(None),
@@ -311,13 +301,12 @@ pub fn root_field_type(
 fn validate_signal_field(
     field_name: &str,
     field_type: ExprLogicalType,
-    valid_for: &'static [SignalKind],
+    valid_for: SignalMask,
     signal_context: &SignalContext,
 ) -> Result<Option<ExprLogicalType>, FieldValidationError> {
     match signal_context {
         SignalContext::All => {
-            // Intersection semantics: only accept fields valid for all signal types
-            if valid_for.len() >= ALL_SIGNALS.len() {
+            if valid_for == SIG_ALL {
                 Ok(Some(field_type))
             } else {
                 Err(FieldValidationError::NotCommonToAllSignals {
@@ -327,7 +316,7 @@ fn validate_signal_field(
             }
         }
         SignalContext::Single(kind) => {
-            if valid_for.contains(kind) {
+            if valid_for & kind.mask() != 0 {
                 Ok(Some(field_type))
             } else {
                 Err(FieldValidationError::InvalidForSignal {
@@ -352,19 +341,6 @@ pub fn attribute_field_type(field_name: &str) -> Option<ExprLogicalType> {
     }
 }
 
-use MetricDataPointType::{
-    ExponentialHistogramDataPoint as ExpHistDP, HistogramDataPoint as HistDP,
-    NumberDataPoint as NumDP, SummaryDataPoint as SumDP,
-};
-
-const ALL_DP_TYPES: &[MetricDataPointType] = &[NumDP, HistDP, ExpHistDP, SumDP];
-const NUM_DP_ONLY: &[MetricDataPointType] = &[NumDP];
-const HIST_EXPHIST_SUMMARY: &[MetricDataPointType] = &[HistDP, ExpHistDP, SumDP];
-const HIST_EXPHIST: &[MetricDataPointType] = &[HistDP, ExpHistDP];
-const HIST_ONLY: &[MetricDataPointType] = &[HistDP];
-const EXPHIST_ONLY: &[MetricDataPointType] = &[ExpHistDP];
-const SUMMARY_ONLY: &[MetricDataPointType] = &[SumDP];
-
 /// Return the type for a metric data point field, validated against the data point context.
 ///
 /// Returns `Ok(Some(type))` if the field is valid for the given data point context.
@@ -377,37 +353,37 @@ pub fn data_point_field_type(
 ) -> Result<Option<ExprLogicalType>, FieldValidationError> {
     let (field_type, valid_for) = match field_name {
         // fields common to all data point types
-        consts::START_TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, ALL_DP_TYPES),
-        consts::TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, ALL_DP_TYPES),
-        consts::FLAGS => (ExprLogicalType::UInt32, ALL_DP_TYPES),
-        consts::ID => (ExprLogicalType::UInt32, ALL_DP_TYPES),
-        consts::PARENT_ID => (ExprLogicalType::UInt32, ALL_DP_TYPES),
+        consts::START_TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, DP_ALL),
+        consts::TIME_UNIX_NANO => (ExprLogicalType::TimestampNanosecond, DP_ALL),
+        consts::FLAGS => (ExprLogicalType::UInt32, DP_ALL),
+        consts::ID => (ExprLogicalType::UInt32, DP_ALL),
+        consts::PARENT_ID => (ExprLogicalType::UInt32, DP_ALL),
 
         // number data point only
-        consts::INT_VALUE => (ExprLogicalType::Int64, NUM_DP_ONLY),
-        consts::DOUBLE_VALUE => (ExprLogicalType::Float64, NUM_DP_ONLY),
+        consts::INT_VALUE => (ExprLogicalType::Int64, DP_NUMBER),
+        consts::DOUBLE_VALUE => (ExprLogicalType::Float64, DP_NUMBER),
 
         // histogram + exp histogram + summary (shared column name "count")
-        consts::HISTOGRAM_COUNT => (ExprLogicalType::Int64, HIST_EXPHIST_SUMMARY),
+        consts::HISTOGRAM_COUNT => (ExprLogicalType::Int64, DP_HIST_EXPHIST_SUMMARY),
 
         // histogram + exp histogram + summary (shared column name "sum")
-        consts::HISTOGRAM_SUM => (ExprLogicalType::Float64, HIST_EXPHIST_SUMMARY),
+        consts::HISTOGRAM_SUM => (ExprLogicalType::Float64, DP_HIST_EXPHIST_SUMMARY),
 
         // histogram + exp histogram only
-        consts::HISTOGRAM_MIN => (ExprLogicalType::Float64, HIST_EXPHIST),
-        consts::HISTOGRAM_MAX => (ExprLogicalType::Float64, HIST_EXPHIST),
+        consts::HISTOGRAM_MIN => (ExprLogicalType::Float64, DP_HIST_EXPHIST),
+        consts::HISTOGRAM_MAX => (ExprLogicalType::Float64, DP_HIST_EXPHIST),
 
         // histogram only
-        consts::HISTOGRAM_BUCKET_COUNTS => (ExprLogicalType::Int64, HIST_ONLY),
-        consts::HISTOGRAM_EXPLICIT_BOUNDS => (ExprLogicalType::Float64, HIST_ONLY),
+        consts::HISTOGRAM_BUCKET_COUNTS => (ExprLogicalType::Int64, DP_HISTOGRAM),
+        consts::HISTOGRAM_EXPLICIT_BOUNDS => (ExprLogicalType::Float64, DP_HISTOGRAM),
 
         // exponential histogram only
-        consts::EXP_HISTOGRAM_SCALE => (ExprLogicalType::Int32, EXPHIST_ONLY),
-        consts::EXP_HISTOGRAM_ZERO_COUNT => (ExprLogicalType::Int64, EXPHIST_ONLY),
-        consts::EXP_HISTOGRAM_ZERO_THRESHOLD => (ExprLogicalType::Float64, EXPHIST_ONLY),
+        consts::EXP_HISTOGRAM_SCALE => (ExprLogicalType::Int32, DP_EXP_HISTOGRAM),
+        consts::EXP_HISTOGRAM_ZERO_COUNT => (ExprLogicalType::Int64, DP_EXP_HISTOGRAM),
+        consts::EXP_HISTOGRAM_ZERO_THRESHOLD => (ExprLogicalType::Float64, DP_EXP_HISTOGRAM),
 
         // summary only
-        consts::SUMMARY_QUANTILE_VALUES => (ExprLogicalType::Float64, SUMMARY_ONLY),
+        consts::SUMMARY_QUANTILE_VALUES => (ExprLogicalType::Float64, DP_SUMMARY),
 
         _ => return Ok(None),
     };
@@ -419,13 +395,12 @@ pub fn data_point_field_type(
 fn validate_dp_field(
     field_name: &str,
     field_type: ExprLogicalType,
-    valid_for: &'static [MetricDataPointType],
+    valid_for: DpMask,
     dp_context: &DataPointContext,
 ) -> Result<Option<ExprLogicalType>, FieldValidationError> {
     match dp_context {
         DataPointContext::All => {
-            // Intersection semantics: only accept fields valid for all data point types
-            if valid_for.len() >= ALL_DP_TYPES.len() {
+            if valid_for == DP_ALL {
                 Ok(Some(field_type))
             } else {
                 Err(FieldValidationError::NotCommonToAllDataPoints {
@@ -435,12 +410,12 @@ fn validate_dp_field(
             }
         }
         DataPointContext::Single(dp_type) => {
-            if valid_for.contains(dp_type) {
+            if valid_for & dp_type.mask() != 0 {
                 Ok(Some(field_type))
             } else {
                 Err(FieldValidationError::InvalidForDataPoint {
                     field: field_name.to_string(),
-                    context_desc: dp_type.as_str().to_string(),
+                    context: dp_context.clone(),
                     valid_for,
                 })
             }

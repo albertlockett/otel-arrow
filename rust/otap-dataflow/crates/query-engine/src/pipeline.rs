@@ -16,6 +16,7 @@ use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 use otel_arrow_contrib_data_engine_expressions::PipelineExpression;
 use otel_arrow_dfe_pdata::OtapArrowRecords;
+use otel_arrow_dfe_pdata::otlp::metrics::MetricType;
 use otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 use std::sync::Arc;
 
@@ -43,7 +44,7 @@ pub mod routing;
 pub mod state;
 
 // Re-export planner types that callers need for configuring pipeline options.
-pub use planner::{SignalContext, SignalKind};
+pub use planner::{MetricTypeContext, SignalContext, SignalKind};
 
 #[cfg(feature = "bench")]
 #[doc(hidden)]
@@ -331,17 +332,13 @@ impl Pipeline {
     /// Create a new [`Pipeline`] instance that will evaluate the passed [`PipelineExpression`]
     /// with the specified options.
     ///
-    /// If `options.signal_context` is `SignalContext::All` and the query source keyword
-    /// indicates a specific signal type, the signal context is automatically narrowed.
+    /// The caller is responsible for setting `options.signal_context` appropriately.
+    /// Use [`Pipeline::new`] for automatic inference from the query source keyword.
     #[must_use]
-    pub fn new_with_options(
+    pub const fn new_with_options(
         pipeline_definition: PipelineExpression,
-        mut options: PipelineOptions,
+        options: PipelineOptions,
     ) -> Self {
-        // Auto-infer signal context if not explicitly set
-        if matches!(options.signal_context, SignalContext::All) {
-            options.signal_context = Self::infer_signal_context(&pipeline_definition);
-        }
         Self {
             pipeline_definition,
             planned_pipeline: None,
@@ -357,14 +354,28 @@ impl Pipeline {
             SignalContext::Single(SignalKind::Logs)
         } else if trimmed.starts_with("traces") {
             SignalContext::Single(SignalKind::Traces)
-        } else if trimmed.starts_with("metrics")
-            || trimmed.starts_with("gauges")
-            || trimmed.starts_with("sums")
-            || trimmed.starts_with("histograms")
-            || trimmed.starts_with("exponential_histograms")
-            || trimmed.starts_with("summaries")
-        {
-            SignalContext::Single(SignalKind::Metrics)
+        } else if trimmed.starts_with("metrics") {
+            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::All))
+        } else if trimmed.starts_with("gauges") {
+            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
+                MetricType::Gauge,
+            )))
+        } else if trimmed.starts_with("sums") {
+            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
+                MetricType::Sum,
+            )))
+        } else if trimmed.starts_with("histograms") {
+            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
+                MetricType::Histogram,
+            )))
+        } else if trimmed.starts_with("exponential_histograms") {
+            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
+                MetricType::ExponentialHistogram,
+            )))
+        } else if trimmed.starts_with("summaries") {
+            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
+                MetricType::Summary,
+            )))
         } else {
             SignalContext::All
         }
@@ -525,7 +536,11 @@ mod test {
     ) -> MetricsData {
         let parser_result = P::parse(query).unwrap();
         let otap_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(metrics_data));
-        let mut pipeline = Pipeline::new(parser_result.pipeline);
+        let options = PipelineOptions {
+            signal_context: SignalContext::Single(SignalKind::Metrics(MetricTypeContext::All)),
+            ..Default::default()
+        };
+        let mut pipeline = Pipeline::new_with_options(parser_result.pipeline, options);
         let result = pipeline.execute(otap_batch).await.unwrap();
         otap_to_metrics_data(result)
     }
@@ -536,7 +551,11 @@ mod test {
     ) -> TracesData {
         let parser_result = P::parse(query).unwrap();
         let otap_batch = otlp_to_otap(&OtlpProtoMessage::Traces(traces_data));
-        let mut pipeline = Pipeline::new(parser_result.pipeline);
+        let options = PipelineOptions {
+            signal_context: SignalContext::Single(SignalKind::Traces),
+            ..Default::default()
+        };
+        let mut pipeline = Pipeline::new_with_options(parser_result.pipeline, options);
         let result = pipeline.execute(otap_batch).await.unwrap();
         otap_to_traces_data(result)
     }

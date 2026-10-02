@@ -103,9 +103,7 @@ impl ExprPlanner {
     /// should return the record scope identifying this data.
     fn record_scope(&self) -> RecordScope {
         match &self.record_type {
-            RecordType::Child(child, _) => match child {
-                ChildRecordKind::DataPoint => RecordScope::Child(ChildRecordKind::DataPoint),
-            },
+            RecordType::Child(child, _) => RecordScope::Child(*child),
             // In attributes mode the attributes batch IS the "root" for evaluation,
             // so we use Signal scope -- same as the top-level signal case.
             _ => RecordScope::Signal,
