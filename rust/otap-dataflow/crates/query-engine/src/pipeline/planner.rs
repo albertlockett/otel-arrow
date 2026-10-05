@@ -1396,6 +1396,16 @@ impl ColumnAccessor {
                             &selectors[1..],
                         )
                     }
+                    RESOURCES_FIELD_NAME | SCOPE_FIELD_NAME
+                        if matches!(record_type, RecordType::Attributes) =>
+                    {
+                        Err(Error::InvalidPipelineError {
+                            cause: format!(
+                                "{column_name} is not accessible inside an attribute pipeline"
+                            ),
+                            query_location: Some(selectors[0].get_query_location().clone()),
+                        })
+                    }
                     RESOURCES_FIELD_NAME => Self::try_from_struct_field(
                         consts::RESOURCE,
                         ArrowPayloadType::ResourceAttrs,
@@ -1451,7 +1461,7 @@ mod test {
 
     use crate::pipeline::{Pipeline, planner::PipelinePlanner};
 
-    use super::{RecordType, SignalContext, SignalKind};
+    use super::{MetricTypeContext, RecordType, SignalContext, SignalKind};
 
     /// Create a planner for log signal pipelines (used in tests).
     fn logs_planner() -> PipelinePlanner {
@@ -1615,6 +1625,191 @@ mod test {
             )
             .unwrap();
         assert_eq!(stages.len(), 2)
+    }
+
+    // -- Field validation tests --
+
+    /// Helper to assert that a query fails planning with an expected substring in the error
+    fn assert_planning_error_contains(query: &str, signal: SignalKind, expected_substr: &str) {
+        let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
+        let planner = PipelinePlanner::new_with_record_type(RecordType::Signal(
+            SignalContext::Single(signal),
+        ));
+        let result = planner.plan_stages(
+            &pipeline_expr,
+            &Pipeline::create_session_context(),
+            &OtapArrowRecords::Logs(Logs::default()),
+        );
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains(expected_substr),
+                    "Expected error containing '{expected_substr}', got: {msg}"
+                );
+            }
+            Ok(_) => panic!("Expected planning error for query: {query}"),
+        }
+    }
+
+    /// Helper to assert that a query succeeds during planning
+    fn assert_planning_ok(query: &str, signal: SignalKind) {
+        let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
+        let planner = PipelinePlanner::new_with_record_type(RecordType::Signal(
+            SignalContext::Single(signal),
+        ));
+        let _stages = planner
+            .plan_stages(
+                &pipeline_expr,
+                &Pipeline::create_session_context(),
+                &OtapArrowRecords::Logs(Logs::default()),
+            )
+            .unwrap_or_else(|e| panic!("Expected planning to succeed for '{query}', got: {e}"));
+    }
+
+    /// Scenario: a logs-only field used in a metrics pipeline should be rejected.
+    /// Guarantees: the planner rejects `severity_number` when the signal context is metrics.
+    #[test]
+    fn test_rejects_logs_field_in_metrics_pipeline() {
+        assert_planning_error_contains(
+            "metrics | where severity_number > 0",
+            SignalKind::Metrics(MetricTypeContext::All),
+            "field 'severity_number' is not valid for metrics pipeline",
+        );
+    }
+
+    /// Scenario: a metrics-only field used in a logs pipeline should be rejected.
+    /// Guarantees: the planner rejects `description` when the signal context is logs.
+    #[test]
+    fn test_rejects_metrics_field_in_logs_pipeline() {
+        assert_planning_error_contains(
+            "logs | where description == \"x\"",
+            SignalKind::Logs,
+            "field 'description' is not valid for logs pipeline",
+        );
+    }
+
+    /// Scenario: a traces-only field used in a metrics pipeline should be rejected.
+    /// Guarantees: the planner rejects `trace_state` when the signal context is metrics.
+    #[test]
+    fn test_rejects_traces_field_in_metrics_pipeline() {
+        assert_planning_error_contains(
+            "metrics | where trace_state == \"x\"",
+            SignalKind::Metrics(MetricTypeContext::All),
+            "field 'trace_state' is not valid for metrics pipeline",
+        );
+    }
+
+    /// Scenario: a signal-specific field used in a mixed signals pipeline is rejected.
+    /// Guarantees: the planner uses intersection semantics and rejects `severity_number`
+    /// when the signal context is All (mixed).
+    #[test]
+    fn test_rejects_non_common_field_in_signals_pipeline() {
+        assert_planning_error_with_context(
+            "signals | where severity_number > 0",
+            SignalContext::All,
+            "not valid in a mixed signals pipeline",
+        );
+    }
+
+    /// Scenario: a field common to all signals should be accepted in any context.
+    /// Guarantees: `schema_url` is accepted in logs, metrics, traces, and signals pipelines.
+    #[test]
+    fn test_accepts_common_field_in_all_contexts() {
+        assert_planning_ok("logs | where schema_url == \"x\"", SignalKind::Logs);
+        assert_planning_ok(
+            "metrics | where schema_url == \"x\"",
+            SignalKind::Metrics(MetricTypeContext::All),
+        );
+        assert_planning_ok("traces | where schema_url == \"x\"", SignalKind::Traces);
+    }
+
+    /// Helper to assert that a query succeeds during planning with a given signal context.
+    fn assert_planning_ok_with_context(query: &str, context: SignalContext) {
+        let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
+        let planner = PipelinePlanner::new_with_record_type(RecordType::Signal(context));
+        let result = planner.plan_stages(
+            &pipeline_expr,
+            &Pipeline::create_session_context(),
+            &OtapArrowRecords::Logs(Logs::default()),
+        );
+        match result {
+            Ok(_) => {}
+            Err(e) => panic!("Expected planning to succeed for '{query}', got: {e}"),
+        }
+    }
+
+    /// Scenario: smart-cast narrows signal context inside `if (is Log) { ... }`.
+    /// Guarantees: `severity_number` is accepted inside a branch guarded by `is Log`,
+    /// even when the outer pipeline is `signals`.
+    #[test]
+    fn test_smart_cast_narrows_signal_context() {
+        assert_planning_ok_with_context(
+            "signals | if (is Log) { where severity_number > 0 }",
+            SignalContext::All,
+        );
+    }
+
+    /// Scenario: smart-cast for metrics should allow metric-only fields inside the branch.
+    /// Guarantees: `aggregation_temporality` is accepted inside `if (is Metric) { ... }`.
+    #[test]
+    fn test_smart_cast_metrics_allows_metric_fields() {
+        assert_planning_ok_with_context(
+            "signals | if (is Metric) { where aggregation_temporality > 0 }",
+            SignalContext::All,
+        );
+    }
+
+    /// Helper to assert that a query fails planning with a given signal context.
+    fn assert_planning_error_with_context(
+        query: &str,
+        context: SignalContext,
+        expected_substr: &str,
+    ) {
+        let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
+        let planner = PipelinePlanner::new_with_record_type(RecordType::Signal(context));
+        let result = planner.plan_stages(
+            &pipeline_expr,
+            &Pipeline::create_session_context(),
+            &OtapArrowRecords::Logs(Logs::default()),
+        );
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains(expected_substr),
+                    "Expected error containing '{expected_substr}', got: {msg}"
+                );
+            }
+            Ok(_) => panic!("Expected planning error for query: {query}"),
+        }
+    }
+
+    /// Scenario: smart-cast should still reject fields invalid for the narrowed type.
+    /// Guarantees: `severity_number` is rejected inside `if (is Metric) { ... }`.
+    #[test]
+    fn test_smart_cast_still_rejects_invalid_fields() {
+        assert_planning_error_with_context(
+            "signals | if (is Metric) { where severity_number > 0 }",
+            SignalContext::All,
+            "field 'severity_number' is not valid for metrics pipeline",
+        );
+    }
+
+    /// Scenario: `name` is valid for both metrics and traces but not logs.
+    /// Guarantees: `name` is accepted in metrics and traces, rejected in logs.
+    #[test]
+    fn test_name_field_valid_for_metrics_and_traces() {
+        assert_planning_ok(
+            "metrics | where name == \"x\"",
+            SignalKind::Metrics(MetricTypeContext::All),
+        );
+        assert_planning_ok("traces | where name == \"x\"", SignalKind::Traces);
+        assert_planning_error_contains(
+            "logs | where name == \"x\"",
+            SignalKind::Logs,
+            "field 'name' is not valid for logs pipeline",
+        );
     }
 
     /// Scenario: automatic signal context inference from the OPL query source.
