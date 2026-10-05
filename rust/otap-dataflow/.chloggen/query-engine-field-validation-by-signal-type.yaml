@@ -1,9 +1,4 @@
 change_type: breaking
 component: query-engine
-note: Reject invalid field references at planning time based on signal type, data point type, and attribute context.
+note: Return planning error for invalid field for signal type, data point type, or attribute context.
 issues: [4070]
-subtext: |
-  Fields that are valid in the OTAP data model but not applicable to the pipeline's
-  signal type are now rejected during planning. For mixed-type pipelines (source
-  `signals` or data points), only fields common to all signal types are accepted. 
-  Use `if (is Log)` or similar to narrow the context.
