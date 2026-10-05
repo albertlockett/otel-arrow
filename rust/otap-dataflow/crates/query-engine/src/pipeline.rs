@@ -11,16 +11,23 @@ use datafusion::config::ConfigOptions;
 use datafusion::execution::TaskContext;
 use datafusion::execution::config::SessionConfig;
 use datafusion::execution::context::SessionContext;
+use datafusion::logical_expr::lit;
 use datafusion::physical_plan::common::collect;
 use datafusion::physical_plan::streaming::PartitionStream;
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
+use datafusion::prelude::col;
 use otel_arrow_contrib_data_engine_expressions::PipelineExpression;
+use otel_arrow_dfe_config::SignalType;
 use otel_arrow_dfe_pdata::OtapArrowRecords;
+use otel_arrow_dfe_pdata::error::Error as PdataError;
 use otel_arrow_dfe_pdata::otlp::metrics::MetricType;
 use otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
+use otel_arrow_dfe_pdata::schema::consts;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
+use crate::pipeline::conditional::{ConditionalPipelineStage, ConditionalPipelineStageBranch};
+use crate::pipeline::expr::{DataScope, LeafEval, RecordScope, ScopedExpr};
 use crate::pipeline::planner::{PipelinePlanner, RecordType};
 use crate::pipeline::state::ExecutionState;
 use crate::table::RecordBatchPartitionStream;
@@ -332,11 +339,29 @@ impl Pipeline {
         Ok(Self::new_with_options(pipeline_definition, options))
     }
 
+    /// Create a new [`Pipeline`] instance, inferring the signal context from the query
+    /// source keyword, but using the caller's other options.
+    ///
+    /// This is useful when the caller needs to set options like
+    /// `filter_attribute_keys_case_sensitive` but still wants auto-inference of signal context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signal type cannot be determined from the query source.
+    pub fn try_new_with_options(
+        pipeline_definition: PipelineExpression,
+        mut options: PipelineOptions,
+    ) -> Result<Self> {
+        options.signal_context = Self::infer_signal_context(&pipeline_definition)?;
+        Ok(Self::new_with_options(pipeline_definition, options))
+    }
+
     /// Create a new [`Pipeline`] instance that will evaluate the passed [`PipelineExpression`]
     /// with the specified options.
     ///
     /// The caller is responsible for setting `options.signal_context` appropriately.
-    /// Use [`Pipeline::try_new`] for automatic inference from the query source keyword.
+    /// Use [`Pipeline::try_new`] or [`Pipeline::try_new_with_options`] for automatic inference
+    /// from the query source keyword.
     #[must_use]
     pub const fn new_with_options(
         pipeline_definition: PipelineExpression,
@@ -346,6 +371,23 @@ impl Pipeline {
             pipeline_definition,
             planned_pipeline: None,
             options,
+        }
+    }
+
+    /// Returns true if this pipeline should process the given signal type.
+    ///
+    /// This allows callers to gate execution at the batch level before calling
+    /// [`Pipeline::execute`] or [`Pipeline::execute_with_state`].
+    #[must_use]
+    pub fn accepts_signal_type(&self, signal_type: SignalType) -> bool {
+        match &self.options.signal_context {
+            SignalContext::All => true,
+            SignalContext::Single(kind) => matches!(
+                (kind, signal_type),
+                (SignalKind::Logs, SignalType::Logs)
+                    | (SignalKind::Metrics(_), SignalType::Metrics)
+                    | (SignalKind::Traces, SignalType::Traces)
+            ),
         }
     }
 
@@ -424,6 +466,24 @@ impl Pipeline {
         mut otap_batch: OtapArrowRecords,
         exec_state: &mut ExecutionState,
     ) -> Result<OtapArrowRecords> {
+        // Reject batches with incompatible signal types
+        let batch_signal_type = Self::batch_signal_type(&otap_batch);
+        if !self.accepts_signal_type(batch_signal_type) {
+            let expected = match &self.options.signal_context {
+                SignalContext::Single(SignalKind::Logs) => SignalType::Logs,
+                SignalContext::Single(SignalKind::Metrics(_)) => SignalType::Metrics,
+                SignalContext::Single(SignalKind::Traces) => SignalType::Traces,
+                // All accepts everything -- unreachable since accepts_signal_type
+                // returns true for All
+                SignalContext::All => unreachable!(),
+            };
+            return Err(PdataError::UnexpectedSignalType {
+                found: batch_signal_type,
+                expected,
+            }
+            .into());
+        }
+
         // lazily plan the pipeline if have not already done so
         if self.planned_pipeline.is_none() {
             let session_ctx = Self::create_session_context();
@@ -433,8 +493,24 @@ impl Pipeline {
             .with_filter_attribute_keys_case_sensitive(
                 self.options.filter_attribute_keys_case_sensitive,
             );
-            let stages =
+            let mut stages =
                 planner.plan_stages(&self.pipeline_definition, &session_ctx, &otap_batch)?;
+
+            // If scoped to a concrete metric type, wrap all planned stages in a
+            // conditional that filters by the metric_type column. Non-matching rows
+            // pass through unmodified.
+            //
+            // TODO: this wrapping in ConditionalPipelineStage is functionally correct
+            // but not optimal -- it splits the batch, runs stages on the matching
+            // subset, then concatenates back. A dedicated metric-type-aware execution
+            // path could avoid the split/concat overhead.
+            if let SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
+                metric_type,
+            ))) = &self.options.signal_context
+            {
+                stages = vec![Self::wrap_in_metric_type_filter(stages, *metric_type)?];
+            }
+
             self.planned_pipeline = Some(PlannedPipeline::new(stages, session_ctx));
         }
 
@@ -473,6 +549,35 @@ impl Pipeline {
 
         SessionContext::new_with_config(session_config)
     }
+
+    /// Get the signal type from an OTAP batch.
+    fn batch_signal_type(batch: &OtapArrowRecords) -> SignalType {
+        match batch {
+            OtapArrowRecords::Logs(_) => SignalType::Logs,
+            OtapArrowRecords::Metrics(_) => SignalType::Metrics,
+            OtapArrowRecords::Traces(_) => SignalType::Traces,
+        }
+    }
+
+    /// Wrap a vec of pipeline stages in a `ConditionalPipelineStage` that filters
+    /// by the `metric_type` column. Non-matching metric rows pass through unmodified.
+    fn wrap_in_metric_type_filter(
+        stages: Vec<BoxedPipelineStage>,
+        metric_type: MetricType,
+    ) -> Result<BoxedPipelineStage> {
+        let predicate = ScopedExpr::Eval {
+            scope: DataScope::Record(RecordScope::Signal),
+            eval: LeafEval::new_df_expr(
+                col(consts::METRIC_TYPE).eq(lit(metric_type as u8)),
+                false,
+            )?,
+        };
+        let branch = ConditionalPipelineStageBranch::new(predicate, stages);
+        Ok(Box::new(ConditionalPipelineStage::new(
+            vec![branch],
+            None, // no default branch -- non-matching rows pass through
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -490,9 +595,9 @@ mod test {
     use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
         Gauge, Metric, MetricsData, Sum,
     };
-    use otel_arrow_dfe_pdata::proto::opentelemetry::trace::v1::{Span, TracesData};
+    use otel_arrow_dfe_pdata::proto::opentelemetry::trace::v1::TracesData;
     use otel_arrow_dfe_pdata::testing::round_trip::{
-        otap_to_otlp, otlp_to_otap, to_otap_logs, to_otap_metrics, to_otap_traces,
+        otap_to_otlp, otlp_to_otap, to_otap_logs, to_otap_metrics,
     };
     use otel_arrow_dfe_pdata::{OtapPayload, OtlpProtoBytes, TryIntoWithOptions};
     use otel_arrow_dfe_query_engine_languages::opl::parser::OplParser;
@@ -663,12 +768,6 @@ mod test {
     /// pass through unchanged.
     #[tokio::test]
     async fn test_pipelines_selecting_concrete_metrics_type_skip_exec_only_on_selected_rows() {
-        let logs_batch = vec![
-            LogRecord::build().event_name("event1").finish(),
-            LogRecord::build().event_name("event2").finish(),
-        ];
-        let spans_batch = vec![Span::build().finish()];
-
         let gauge_metric = Metric::build()
             .name("gauge_metric")
             .data_gauge(Gauge::default())
@@ -683,14 +782,16 @@ mod test {
         let parser_result = OplParser::parse(query).unwrap();
         let mut pipeline = Pipeline::try_new(parser_result.pipeline).unwrap();
 
-        let logs_input = to_otap_logs(logs_batch);
-        let result = pipeline.execute(logs_input.clone()).await.unwrap();
-        pretty_assertions::assert_eq!(result, logs_input);
+        // Pipeline should reject non-metrics signal types
+        assert!(!pipeline.accepts_signal_type(SignalType::Logs));
+        assert!(!pipeline.accepts_signal_type(SignalType::Traces));
+        assert!(pipeline.accepts_signal_type(SignalType::Metrics));
 
-        let traces_input = to_otap_traces(spans_batch);
-        let result = pipeline.execute(traces_input.clone()).await.unwrap();
-        pretty_assertions::assert_eq!(result, traces_input);
+        // Pipeline should reject logs batches at execution time
+        let logs_input = to_otap_logs(vec![LogRecord::build().finish()]);
+        assert!(pipeline.execute(logs_input).await.is_err());
 
+        // Pipeline should transform only gauge rows, leaving sum rows unchanged
         let metrics_input = to_otap_metrics(vec![gauge_metric.clone(), sum_metric.clone()]);
         let result = pipeline.execute(metrics_input).await.unwrap();
         let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
