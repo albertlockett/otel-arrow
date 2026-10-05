@@ -488,7 +488,7 @@ mod test {
                 where value > 5
             }"#;
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
         let input = OtapArrowRecords::Logs(Logs::default());
         let result = pipeline.execute(input.clone()).await.unwrap();
@@ -504,7 +504,7 @@ mod test {
                 where value > 5
             }"#;
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
         let result = pipeline.execute(input.clone()).await.unwrap();
         assert_eq!(result, input)
@@ -523,7 +523,7 @@ mod test {
                 where value < 5
             }"#;
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
         let result = pipeline.execute(input.clone()).await.unwrap();
         assert!(result.get(ArrowPayloadType::LogAttrs).is_none())
@@ -1006,7 +1006,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let result = pipeline.execute(input).await.unwrap();
 
         // verify we have the correct type
@@ -1061,7 +1061,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let result = pipeline.execute(input).await.unwrap();
 
         // null + 2 would evaluate to null, which means the whole column is null which means
@@ -1097,7 +1097,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let result = pipeline.execute(input).await.unwrap();
 
         // null + 2.0 would evaluate to null, which means the whole column is null which means
@@ -1139,7 +1139,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let result = pipeline.execute(input).await.unwrap();
 
         let logs_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
@@ -1175,7 +1175,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let result = pipeline.execute(input).await.unwrap();
 
         let logs_attrs = result.get(ArrowPayloadType::LogAttrs).unwrap();
@@ -1216,7 +1216,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let result = pipeline.execute(input).await.unwrap();
 
         // assert we still have the empty attributes
@@ -1251,7 +1251,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         // just make sure we don't panic/return error and that we end up with zero attrs
         let result = pipeline.execute(input).await.unwrap();
         assert!(result.get(ArrowPayloadType::LogAttrs).is_none());
@@ -1274,7 +1274,7 @@ mod test {
                 set value = value * 2
             }"#;
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let err = pipeline.execute(input).await.unwrap_err();
         assert!(
             err.to_string().contains("All input rows for attribute assignment must have the same type if value used in expression"),
@@ -1449,7 +1449,7 @@ mod test {
             }"#;
 
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
         let input = otlp_to_otap(&OtlpProtoMessage::Logs(input));
         let result = pipeline.execute(input.clone()).await.unwrap();

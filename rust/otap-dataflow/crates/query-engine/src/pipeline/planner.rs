@@ -1813,17 +1813,17 @@ mod test {
     }
 
     /// Scenario: automatic signal context inference from the OPL query source.
-    /// Guarantees: `Pipeline::new()` auto-infers logs signal context from query source
-    /// and accepts logs-only fields without explicit signal context.
+    /// Guarantees: `Pipeline::try_new()` auto-infers logs signal context from query
+    /// source and accepts logs-only fields without explicit signal context.
     #[tokio::test]
     async fn test_auto_inference_from_query_source() {
         let pipeline_expr = OplParser::parse("logs | where severity_number > 0")
             .unwrap()
             .pipeline;
-        // Pipeline::new() should auto-infer SignalContext::Single(Logs) from the
+        // Pipeline::try_new() should auto-infer SignalContext::Single(Logs) from the
         // "logs" source keyword, so planning should succeed for logs-only fields.
         let otap_batch = OtapArrowRecords::Logs(Logs::default());
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         // This would fail if auto-inference didn't work, since severity_number
         // is logs-only and the default context would be All.
         let _ = pipeline.execute(otap_batch).await.unwrap();

@@ -319,21 +319,24 @@ impl Pipeline {
     ///
     /// The signal context is automatically inferred from the query source keyword
     /// (e.g. `logs`, `metrics`, `traces`, `signals`).
-    #[must_use]
-    pub fn new(pipeline_definition: PipelineExpression) -> Self {
-        let signal_context = Self::infer_signal_context(&pipeline_definition);
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signal type cannot be determined from the query source.
+    pub fn try_new(pipeline_definition: PipelineExpression) -> Result<Self> {
+        let signal_context = Self::infer_signal_context(&pipeline_definition)?;
         let options = PipelineOptions {
             signal_context,
             ..Default::default()
         };
-        Self::new_with_options(pipeline_definition, options)
+        Ok(Self::new_with_options(pipeline_definition, options))
     }
 
     /// Create a new [`Pipeline`] instance that will evaluate the passed [`PipelineExpression`]
     /// with the specified options.
     ///
     /// The caller is responsible for setting `options.signal_context` appropriately.
-    /// Use [`Pipeline::new`] for automatic inference from the query source keyword.
+    /// Use [`Pipeline::try_new`] for automatic inference from the query source keyword.
     #[must_use]
     pub const fn new_with_options(
         pipeline_definition: PipelineExpression,
@@ -347,37 +350,47 @@ impl Pipeline {
     }
 
     /// Infer the signal context from the query source keyword in the pipeline expression.
-    fn infer_signal_context(pipeline_def: &PipelineExpression) -> SignalContext {
+    ///
+    /// Returns an error if the query does not start with a recognized source keyword.
+    fn infer_signal_context(pipeline_def: &PipelineExpression) -> Result<SignalContext> {
         let query = pipeline_def.get_query();
         let trimmed = query.trim_start();
+        // Note: order matters -- "exponential_histograms" must be checked before
+        // "histograms" to avoid a false prefix match, and "signals" before "sums".
         if trimmed.starts_with("logs") {
-            SignalContext::Single(SignalKind::Logs)
+            Ok(SignalContext::Single(SignalKind::Logs))
         } else if trimmed.starts_with("traces") {
-            SignalContext::Single(SignalKind::Traces)
+            Ok(SignalContext::Single(SignalKind::Traces))
         } else if trimmed.starts_with("metrics") {
-            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::All))
+            Ok(SignalContext::Single(SignalKind::Metrics(
+                MetricTypeContext::All,
+            )))
         } else if trimmed.starts_with("gauges") {
-            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
-                MetricType::Gauge,
+            Ok(SignalContext::Single(SignalKind::Metrics(
+                MetricTypeContext::Single(MetricType::Gauge),
             )))
-        } else if trimmed.starts_with("sums") {
-            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
-                MetricType::Sum,
-            )))
-        } else if trimmed.starts_with("histograms") {
-            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
-                MetricType::Histogram,
+        } else if trimmed.starts_with("signals") {
+            Ok(SignalContext::All)
+        } else if trimmed.starts_with("summaries") {
+            Ok(SignalContext::Single(SignalKind::Metrics(
+                MetricTypeContext::Single(MetricType::Summary),
             )))
         } else if trimmed.starts_with("exponential_histograms") {
-            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
-                MetricType::ExponentialHistogram,
+            Ok(SignalContext::Single(SignalKind::Metrics(
+                MetricTypeContext::Single(MetricType::ExponentialHistogram),
             )))
-        } else if trimmed.starts_with("summaries") {
-            SignalContext::Single(SignalKind::Metrics(MetricTypeContext::Single(
-                MetricType::Summary,
+        } else if trimmed.starts_with("histograms") {
+            Ok(SignalContext::Single(SignalKind::Metrics(
+                MetricTypeContext::Single(MetricType::Histogram),
             )))
         } else {
-            SignalContext::All
+            Err(Error::InvalidPipelineError {
+                cause: "could not determine signal type from query source; \
+                     expected one of: logs, metrics, traces, signals, gauges, \
+                     sums, histograms, exponential_histograms, summaries"
+                    .into(),
+                query_location: None,
+            })
         }
     }
 
@@ -668,7 +681,7 @@ mod test {
 
         let query = "gauges | set name =\"gauge_name_updated\"";
         let parser_result = OplParser::parse(query).unwrap();
-        let mut pipeline = Pipeline::new(parser_result.pipeline);
+        let mut pipeline = Pipeline::try_new(parser_result.pipeline).unwrap();
 
         let logs_input = to_otap_logs(logs_batch);
         let result = pipeline.execute(logs_input.clone()).await.unwrap();
@@ -702,7 +715,7 @@ mod test {
     #[tokio::test]
     async fn test_scale_metric_rejects_non_metric_signals() {
         let parser_result = OplParser::parse("logs | scale_metric 2").unwrap();
-        let mut pipeline = Pipeline::new(parser_result.pipeline);
+        let mut pipeline = Pipeline::try_new(parser_result.pipeline).unwrap();
         let result = pipeline
             .execute(to_otap_logs(vec![LogRecord::build().finish()]))
             .await;

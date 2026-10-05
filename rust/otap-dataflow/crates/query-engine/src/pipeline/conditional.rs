@@ -650,7 +650,7 @@ mod test {
         )
         .unwrap()
         .pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
         let input = OtapArrowRecords::Logs(Logs::default());
         let result = pipeline.execute(input.clone()).await.unwrap();
@@ -714,7 +714,7 @@ mod test {
             }
         "#;
         let pipeline_expr = OplParser::parse(query).unwrap().pipeline;
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
         let mut execution_state = ExecutionState::new();
 

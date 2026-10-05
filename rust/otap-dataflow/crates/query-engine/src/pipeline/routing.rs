@@ -158,7 +158,7 @@ mod test {
             .with_expressions(vec![DataExpression::Output(output_expr)])
             .build()
             .unwrap();
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
         let mut exec_state = ExecutionState::new();
         let test_router = TestRouter { routed: vec![] };
@@ -203,7 +203,7 @@ mod test {
             .with_expressions(vec![DataExpression::Output(output_expr)])
             .build()
             .unwrap();
-        let mut pipeline = Pipeline::new(pipeline_expr);
+        let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
         let mut exec_state = ExecutionState::new();
         let otap_batch = OtapArrowRecords::Logs(Logs::default());
         let result = pipeline
