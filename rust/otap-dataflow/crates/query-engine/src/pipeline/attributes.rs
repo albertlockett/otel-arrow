@@ -402,7 +402,8 @@ mod test {
         ];
 
         for query in invalid_renames {
-            let mut pipeline = Pipeline::new(KqlParser::parse(query).unwrap().pipeline);
+            let mut pipeline =
+                Pipeline::try_new(KqlParser::parse(query).unwrap().pipeline).unwrap();
             let result = pipeline
                 .execute(OtapArrowRecords::Logs(Logs::default()))
                 .await;
@@ -422,7 +423,8 @@ mod test {
         ];
 
         for query in invalid_renames {
-            let mut pipeline = Pipeline::new(OplParser::parse(query).unwrap().pipeline);
+            let mut pipeline =
+                Pipeline::try_new(OplParser::parse(query).unwrap().pipeline).unwrap();
             let result = pipeline
                 .execute(OtapArrowRecords::Logs(Logs::default()))
                 .await;
@@ -546,7 +548,7 @@ mod test {
             project-away attributes[\"x\"], attributes[\"x2\"]
         ";
         let parser_result = P::parse(query).unwrap();
-        let mut pipeline = Pipeline::new(parser_result.pipeline);
+        let mut pipeline = Pipeline::try_new(parser_result.pipeline).unwrap();
         let result = pipeline.execute(otap_batch).await.unwrap();
 
         assert!(
