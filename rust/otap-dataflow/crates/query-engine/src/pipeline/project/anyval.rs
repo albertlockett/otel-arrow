@@ -292,6 +292,9 @@ pub(crate) fn wrap_as_any_value_struct(values: &ArrayRef) -> Result<ArrayRef> {
 /// Attempt to coerce the values array (a struct array representing an AnyValue) into the concrete
 /// values type. If the passed array contains multiple types, the original array is returned
 /// because coercion was not successful.
+//
+// TODO - if this didn't construct a record batch (which it shouldn't have to) then this wouldn't
+// allocate an Arc or need to return an error...
 pub(crate) fn attempt_coerce_value_column_from_any_value_struct_column(
     values: &ArrayRef,
 ) -> Result<ArrayRef> {

@@ -85,8 +85,7 @@ impl<'a> EvalContext<'a> {
     }
 
     /// return the data_point_type
-    #[cfg(test)]
-    pub(crate) fn data_point_type(&self) -> Option<&MetricDataPointType> {
+    pub fn data_point_type(&self) -> Option<&MetricDataPointType> {
         self.data_point_type.as_ref()
     }
 }

@@ -71,13 +71,15 @@ use crate::pipeline::expr::join::{
 };
 use crate::pipeline::expr::planner::PlannedOp;
 use crate::pipeline::expr::types::{
-    ExprLogicalType, MetricDataPointType, attribute_field_type, nested_struct_field_type,
-    root_field_supports_dict_encoding, root_field_type,
+    ExprLogicalType, MetricDataPointType, attribute_field_type, data_point_field_type,
+    nested_struct_field_type, root_field_supports_dict_encoding, root_field_type,
 };
 use crate::pipeline::expr::{
     ChildRecordKind, DataScope, RecordScope, RootParentStruct, ScopedExpr, ScopedValue,
 };
-use crate::pipeline::planner::{AttributesIdentifier, ColumnAccessor, RecordType};
+use crate::pipeline::planner::{
+    AttributesIdentifier, ColumnAccessor, DataPointContext, RecordType,
+};
 use crate::pipeline::project::anyval::{
     attempt_coerce_value_column_from_any_value_struct_column, fill_null_type_as_empty,
     is_any_value_data_type, wrap_as_any_value_struct,
@@ -192,54 +194,62 @@ impl AssignPipelineStage {
         })
     }
 
-    /// Assign the result of the expression evaluation to a column on the root record batch.
-    fn assign_to_root(
+    fn assign_to_record(
         &self,
         mut otap_batch: OtapArrowRecords,
         mut scoped_value: ScopedValue,
+        eval_ctx: &EvalContext<'_>,
         dest_scope: &DataScope,
         dest_column_name: &str,
     ) -> Result<OtapArrowRecords> {
-        let root_batch = match otap_batch.root_record_batch() {
-            Some(rb) => rb,
-            None => {
-                // nothing to do
-                return Ok(otap_batch);
+        let (target_rb_payload_type, expected_column_logical_type) = match &self.record_type {
+            RecordType::Signal(signal_ctx) => (
+                otap_batch.root_payload_type(),
+                root_field_type(dest_column_name, signal_ctx),
+            ),
+            RecordType::DataPoint(dp_ctx) => (
+                // TODO no unwrap here -- we'd be doing something wrong if this was None
+                eval_ctx
+                    .data_point_type()
+                    .map(|dp_type| dp_type.payload_type())
+                    .unwrap(),
+                data_point_field_type(dest_column_name, dp_ctx),
+            ),
+            RecordType::Attributes => {
+                todo!()
             }
         };
 
-        // safety: the signal context was validated during planning, so root_field_type
-        // should not return Err or Ok(None) for any field that was accepted at plan time.
-        let signal_ctx = self
-            .record_type
-            .signal_context()
-            .expect("assign_to_root called with Signal record type");
-        let expected_column_logical_type = root_field_type(dest_column_name, signal_ctx)
-            // safety: this will only return None if the destination column does not exist in OTAP
-            // data model, but this has been validated in the constructor of this type, so it's
-            // safe to expect here
-            .expect("dest column found");
+        // TODO - not sure if we can unwrap this? It's validated in planning
+        let expected_column_logical_type = expected_column_logical_type.unwrap();
+
+        let Some(target_rb) = otap_batch.get(target_rb_payload_type) else {
+            // nothing to do
+            return Ok(otap_batch);
+        };
 
         // AnyValue destinations (e.g., body) need special handling: the result may be a
         // concrete typed array that needs wrapping into an AnyValue struct, or it may already
         // be an AnyValue struct that can be assigned directly.
         if expected_column_logical_type == ExprLogicalType::AnyValue {
-            let root_batch = root_batch.clone();
+            // TODO - should we _validate_ that the root_type is actually root here? (I think it's
+            // impossible for it not to be unless we screw around with the type defs)
             return self.assign_any_value_to_root(
                 otap_batch,
                 scoped_value,
                 dest_scope,
                 dest_column_name,
-                &root_batch,
             );
         }
 
+        // TODO - this is a big assumption here wrt to safety that not sure if I trust ...
         let expected_column_data_type = expected_column_logical_type
             .datatype()
             // safety: this will only return None if the logical data type for the field is
             // ambiguous, which is the case for attributes/AnyValues, but we've handled AnyValue
             // above, so the remaining types are all concrete and safe to expect here
             .expect("dest column data type");
+
         // if we've received an AnyValue as the assignment source, but the destination is not an
         // AnyValue, we coerce attempt to coerce it into a single value
         if let ColumnarValue::Array(values) = &scoped_value.values
@@ -254,10 +264,8 @@ impl AssignPipelineStage {
         // produced as an int64 by default, however the expression tree doesn't actually specify
         // the type, so we assume the type should have matched the expected type here and cast it
         let mut eval_result_column_type = scoped_value.values.data_type();
-        if scoped_value.scope == DataScope::StaticScalar
-            && eval_result_column_type.is_integer()
-            && expected_column_data_type.is_integer()
-        {
+        // if scoped_value.scope == DataScope::StaticScalar
+        if eval_result_column_type.is_integer() && expected_column_data_type.is_integer() {
             scoped_value.values = scoped_value
                 .values
                 .cast_to(&expected_column_data_type, None)?;
@@ -292,7 +300,7 @@ impl AssignPipelineStage {
         let mut values = eval_result_to_array(
             &scoped_value.values,
             column_supports_dict_encoding,
-            root_batch.num_rows(),
+            target_rb.num_rows(),
         )?;
 
         // align the rows in the new values with the rows in the root batch, if not already aligned
@@ -319,7 +327,7 @@ impl AssignPipelineStage {
                 &JoinInput::new(
                     ColumnarValue::Scalar(ScalarValue::Null), // empty placeholder,
                     Rc::new(dest_scope.clone()),
-                    root_batch,
+                    target_rb,
                 ),
                 &eval_result,
                 &OtapArrowRecords::Logs(Logs::default()), // empty placeholder
@@ -329,10 +337,9 @@ impl AssignPipelineStage {
         };
 
         // replace the root record batch with the new one
-        let root_payload_type = otap_batch.root_payload_type();
         otap_batch.set(
-            root_payload_type,
-            try_upsert_column(dest_column_name, values, root_batch)?,
+            target_rb_payload_type,
+            try_upsert_column(dest_column_name, values, target_rb)?,
         )?;
 
         Ok(otap_batch)
@@ -348,8 +355,11 @@ impl AssignPipelineStage {
         scoped_value: ScopedValue,
         dest_scope: &DataScope,
         dest_column_name: &str,
-        root_batch: &RecordBatch,
     ) -> Result<OtapArrowRecords> {
+        let Some(root_batch) = otap_batch.root_record_batch() else {
+            // nothing to do
+            return Ok(otap_batch);
+        };
         // Convert the evaluation result to an array (no dict encoding for struct columns)
         let mut values = eval_result_to_array(&scoped_value.values, false, root_batch.num_rows())?;
 
@@ -1129,14 +1139,21 @@ impl PipelineStage for AssignPipelineStage {
         // support bulk assignment so we just evaluate the expressions and update the columns
         // one at a time
         for i in 0..self.sources.len() {
-            let eval_result = self.sources[i]
-                .execute_as_value(&otap_batch, &EvalContext::new(session_context))?;
+            let eval_ctx = EvalContext::new(session_context);
+            let eval_result = self.sources[i].execute_as_value(&otap_batch, &eval_ctx)?;
             let dest_scope = &self.dest_scopes[i];
             match &self.dest_columns[i] {
                 ColumnAccessor::ColumnName(dest_col_name) => {
                     otap_batch = match eval_result {
                         Some(eval_result) => {
-                            self.assign_to_root(otap_batch, eval_result, dest_scope, dest_col_name)
+                            self.assign_to_record(
+                                otap_batch,
+                                eval_result,
+                                &eval_ctx,
+                                dest_scope,
+                                dest_col_name,
+                            )
+                            // self.assign_to_root(otap_batch, eval_result, dest_scope, dest_col_name)
                         }
                         None => self.assign_null_root_column(otap_batch, dest_col_name),
                     }?;
@@ -1468,18 +1485,41 @@ impl PipelineStage for AssignPipelineStage {
                 continue;
             }
 
-            // TODO support - add support for additional assignment targets for metric data points
-            return Err(match self.dest_columns[0] {
-                ColumnAccessor::ColumnName(_) | ColumnAccessor::StructCol(_, _) => {
-                    Error::NotYetSupportedError {
-                        message: "assigning metric data point columns not yet supported".into(),
+            // Assigning to the metric data point record batch. Unlike attribute assignment, this
+            // does not currently support bulk assignment, so we just evaluate the expressions and
+            // update the columns one at a time.
+            for i in 0..self.sources.len() {
+                let eval_result = self.sources[i].execute_as_value(&otap_batch, &eval_ctx)?;
+                let dest_scope = &self.dest_scopes[i];
+                match &self.dest_columns[i] {
+                    ColumnAccessor::ColumnName(dest_col_name) => {
+                        otap_batch = match eval_result {
+                            Some(eval_result) => self.assign_to_record(
+                                otap_batch,
+                                eval_result,
+                                &eval_ctx,
+                                dest_scope,
+                                dest_col_name,
+                            ),
+                            None => {
+                                todo!()
+                            }
+                        }?;
+                    }
+
+                    ColumnAccessor::StructCol(_, _) => {
+                        return Err(Error::NotYetSupportedError {
+                            message: "assigning metric data point columns not yet supported".into(),
+                        });
+                    }
+                    ColumnAccessor::NestedAttribute(_, _, _) | ColumnAccessor::Attributes(_, _) => {
+                        // safety: we've handled both of these in the blocks above
+                        unreachable!(
+                            "already handled column accessor attributes and nested attributes"
+                        )
                     }
                 }
-                ColumnAccessor::NestedAttribute(_, _, _) | ColumnAccessor::Attributes(_, _) => {
-                    // safety: we've handled both of these in the blocks above
-                    unreachable!("already handled column accessor attributes and nested attributes")
-                }
-            });
+            }
         }
 
         Ok(otap_batch)
@@ -2100,10 +2140,17 @@ fn validate_assign(
                         query_location: dest_query_location.cloned(),
                     })?
                 }
-                RecordType::DataPoint(_) => {
-                    return Err(Error::NotYetSupportedError {
-                        message: "assignment to datapoint fields not yet supported".into(),
-                    });
+                RecordType::DataPoint(dp_ctx) => {
+                    // TODO - should we have test coverage for this?
+                    // TODO - will the error message be ugly?
+                    data_point_field_type(col_name, dp_ctx).ok_or_else(|| {
+                        Error::InvalidPipelineError {
+                            cause: format!(
+                                "cannot assign field '{col_name}' for data point type {dp_ctx:?}"
+                            ),
+                            query_location: dest_query_location.cloned(),
+                        }
+                    })?
                 }
             };
 

@@ -1658,17 +1658,15 @@ async fn test_filter_data_point_by_nested_attribute() {
     .await;
 }
 
-/// In a handful of tests below, we want to ensure that values are assigned to all data point types
-/// with the correct key / value from sources involving various types of expressions. This helper
-/// simply populates each type of data point, evaluates the expression, and ensures the correct
-/// attribute was assigned. The motivation for this is to reduce the boilerplate of creating
-/// fixtures and asserting the result of each test case.
-async fn run_assign_to_all_data_point_type_test(
+/// Creates one metric of each type, each containing a single data point with the specified
+/// flags and values. It then applies the query to transform the batch, and runs validate
+/// function on the "data" field from each metric.
+async fn run_all_data_point_type_test(
     query: &str,
-    flags: u32,
+    time_unix_nano: Option<u64>,
+    flags: Option<u32>,
     attributes: Option<Vec<KeyValue>>,
-    expected_key: &str,
-    expected_value: AnyValue,
+    validate: impl Fn(Data) -> (),
 ) {
     let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
         .unwrap()
@@ -1681,7 +1679,8 @@ async fn run_assign_to_all_data_point_type_test(
             .data_gauge(Gauge {
                 data_points: vec![
                     NumberDataPoint::build()
-                        .flags(flags)
+                        .time_unix_nano(time_unix_nano.unwrap_or_default())
+                        .flags(flags.unwrap_or_default())
                         .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
                 ],
@@ -1692,7 +1691,8 @@ async fn run_assign_to_all_data_point_type_test(
             .data_sum(Sum {
                 data_points: vec![
                     NumberDataPoint::build()
-                        .flags(flags)
+                        .time_unix_nano(time_unix_nano.unwrap_or_default())
+                        .flags(flags.unwrap_or_default())
                         .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
                 ],
@@ -1704,7 +1704,8 @@ async fn run_assign_to_all_data_point_type_test(
             .data_histogram(Histogram {
                 data_points: vec![
                     HistogramDataPoint::build()
-                        .flags(flags)
+                        .time_unix_nano(time_unix_nano.unwrap_or_default())
+                        .flags(flags.unwrap_or_default())
                         .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
                 ],
@@ -1716,7 +1717,8 @@ async fn run_assign_to_all_data_point_type_test(
             .data_exponential_histogram(ExponentialHistogram {
                 data_points: vec![
                     ExponentialHistogramDataPoint::build()
-                        .flags(flags)
+                        .time_unix_nano(time_unix_nano.unwrap_or_default())
+                        .flags(flags.unwrap_or_default())
                         .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
                 ],
@@ -1728,7 +1730,8 @@ async fn run_assign_to_all_data_point_type_test(
             .data_summary(Summary {
                 data_points: vec![
                     SummaryDataPoint::build()
-                        .flags(flags)
+                        .time_unix_nano(time_unix_nano.unwrap_or_default())
+                        .flags(flags.unwrap_or_default())
                         .attributes(attributes.clone().unwrap_or_default())
                         .finish(),
                 ],
@@ -1751,11 +1754,104 @@ async fn run_assign_to_all_data_point_type_test(
             .len(),
         5
     );
+
     for metric in metrics_result.resource_metrics[0].scope_metrics[0]
         .metrics
         .iter()
     {
-        let attrs = match metric.data.as_ref().unwrap() {
+        let data = metric.data.clone().unwrap();
+        validate(data)
+    }
+}
+
+#[tokio::test]
+async fn test_assign_metrics_data_point_field_from_constant() {
+    let query = "metrics | apply data_points {
+        set flags = 5
+    }";
+    run_all_data_point_type_test(query, None, Some(6), None, |data| {
+        let new_flags = match &data {
+            Data::Gauge(g) => g.data_points[0].flags,
+            Data::Sum(s) => s.data_points[0].flags,
+            Data::Histogram(h) => h.data_points[0].flags,
+            Data::ExponentialHistogram(e) => e.data_points[0].flags,
+            Data::Summary(s) => s.data_points[0].flags,
+        };
+        assert_eq!(new_flags, 5);
+    })
+    .await
+}
+
+#[tokio::test]
+async fn test_assign_metrics_data_point_from_other_root_scoped_field() {
+    let query = "metrics | apply data_points {
+        set start_time_unix_nano = time_unix_nano
+    }";
+    run_all_data_point_type_test(query, Some(5), Some(6), None, |data| {
+        let new_start_ts = match &data {
+            Data::Gauge(g) => g.data_points[0].start_time_unix_nano,
+            Data::Sum(s) => s.data_points[0].start_time_unix_nano,
+            Data::Histogram(h) => h.data_points[0].start_time_unix_nano,
+            Data::ExponentialHistogram(e) => e.data_points[0].start_time_unix_nano,
+            Data::Summary(s) => s.data_points[0].start_time_unix_nano,
+        };
+        assert_eq!(new_start_ts, 5);
+    })
+    .await
+}
+
+#[ignore = "auto int coercion not working correctly for this case"]
+#[tokio::test]
+async fn test_assign_metrics_data_point_from_attribute() {
+    // TODO - shouldn't this be automatically coerced correctly?
+    let query = "metrics | apply data_points {
+        set flags = attributes[\"x\"]
+    }";
+    let attrs = vec![KeyValue::new("x", AnyValue::new_int(5))];
+    run_all_data_point_type_test(query, None, Some(6), Some(attrs), |data| {
+        let new_flags = match &data {
+            Data::Gauge(g) => g.data_points[0].flags,
+            Data::Sum(s) => s.data_points[0].flags,
+            Data::Histogram(h) => h.data_points[0].flags,
+            Data::ExponentialHistogram(e) => e.data_points[0].flags,
+            Data::Summary(s) => s.data_points[0].flags,
+        };
+        assert_eq!(new_flags, 5);
+    })
+    .await
+}
+
+#[ignore]
+#[tokio::test]
+async fn test_assign_metrics_data_point_from_root_parent_attributes() {
+    todo!("resource");
+    todo!("scope");
+}
+
+#[ignore]
+#[tokio::test]
+async fn test_assign_metrics_data_point_must_to_null() {
+    todo!()
+}
+
+// TODO - assign one dp type specifically, etc.
+// TODO - assign invalid field name (never valid name)
+// TODO - assign invalid field name for only some dp type
+
+/// In a handful of tests below, we want to ensure that values are assigned to all data point types
+/// with the correct key / value from sources involving various types of expressions. This helper
+/// simply populates each type of data point, evaluates the expression, and ensures the correct
+/// attribute was assigned. The motivation for this is to reduce the boilerplate of creating
+/// fixtures and asserting the result of each test case.
+async fn run_assign_to_all_data_point_type_test(
+    query: &str,
+    flags: u32,
+    attributes: Option<Vec<KeyValue>>,
+    expected_key: &str,
+    expected_value: AnyValue,
+) {
+    run_all_data_point_type_test(query, None, Some(flags), attributes, |data| {
+        let attrs = match &data {
             Data::Gauge(g) => {
                 assert_eq!(g.data_points.len(), 1);
                 &g.data_points[0].attributes
@@ -1780,7 +1876,8 @@ async fn run_assign_to_all_data_point_type_test(
 
         let expected_attr = attrs.iter().find(|kv| kv.key == expected_key).unwrap();
         assert_eq!(expected_attr.value.as_ref().unwrap(), &expected_value);
-    }
+    })
+    .await;
 }
 
 /// Scenario: test creating a new attribute from a scalar value
@@ -2131,6 +2228,7 @@ async fn test_filter_data_point_by_attribute_with_dict_u16_parent_ids() {
     assert_metrics_eq(metrics_result, expected);
 }
 
+// TODO this could use the new helper...
 /// Helper function for nested attribute assignment tests on metric data points.
 ///
 /// Runs the given query against all metric data point types, where each data point has the
