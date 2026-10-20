@@ -28,6 +28,7 @@ use crate::pipeline::concat::{
     concatenate_attrs_record_batches, concatenate_logs, concatenate_metrics, concatenate_traces,
 };
 use crate::pipeline::expr::eval::EvalContext;
+use crate::pipeline::expr::types::MetricDataPointType;
 use crate::pipeline::expr::{DataScope, ScopedExpr};
 use crate::pipeline::filter::{align_selection_to_root, scoped_value_to_boolean_array};
 use crate::pipeline::planner::RecordType;
@@ -462,8 +463,25 @@ impl PipelineStage for ConditionalPipelineStage {
         Ok(final_result)
     }
 
+    async fn execute_on_metric_data_points(
+        &mut self,
+        otap_batch: OtapArrowRecords,
+        session_context: &SessionContext,
+        config_options: &ConfigOptions,
+        task_context: Arc<TaskContext>,
+        exec_state: &mut ExecutionState,
+    ) -> Result<OtapArrowRecords> {
+        for metric_data_point_type in MetricDataPointType::all() {
+            if otap_batch.get(metric_data_point_type.payload_type()).is_some() {
+
+            }
+        }
+
+        todo!()
+    }
+
     fn supports_exec_on(&self, record_type: &RecordType) -> bool {
-        matches!(record_type, RecordType::Attributes | RecordType::Signal(_))
+        matches!(record_type, RecordType::Attributes | RecordType::Signal(_) | RecordType::DataPoint(_))
     }
 
     // Propagate parent splitting required by any nested conditional branch.

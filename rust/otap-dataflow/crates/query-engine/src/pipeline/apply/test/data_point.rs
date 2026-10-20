@@ -5,6 +5,7 @@
 
 use otel_arrow_contrib_data_engine_kql_parser::Parser;
 use otel_arrow_dfe_pdata::{
+    OtapPayloadHelpers,
     proto::{
         OtlpProtoMessage,
         opentelemetry::{
@@ -3085,4 +3086,100 @@ async fn test_filter_data_points_by_missing_resource_attribute() {
             "{query} with env on first resource: {env_on_first_resource}"
         );
     }
+}
+
+fn generate_metric_all_types_batch_with_attrs(attributes: &[Vec<KeyValue>]) -> MetricsData {
+    let number_dps = attributes
+        .iter()
+        .map(|attrs| NumberDataPoint::build().attributes(attrs.clone()).finish())
+        .collect::<Vec<_>>();
+
+    let hist_dps = attributes
+        .iter()
+        .map(|attrs| {
+            HistogramDataPoint::build()
+                .attributes(attrs.clone())
+                .finish()
+        })
+        .collect::<Vec<_>>();
+
+    let exp_dps = attributes
+        .iter()
+        .map(|attrs| {
+            ExponentialHistogramDataPoint::build()
+                .attributes(attrs.clone())
+                .finish()
+        })
+        .collect::<Vec<_>>();
+
+    let summary_dps = attributes
+        .iter()
+        .map(|attrs| SummaryDataPoint::build().attributes(attrs.clone()).finish())
+        .collect::<Vec<_>>();
+
+    to_metrics_data(vec![
+        Metric::build()
+            .name("gauge")
+            .data_gauge(Gauge::new(number_dps.clone()))
+            .finish(),
+        Metric::build()
+            .name("sum")
+            .data_sum(Sum::new(
+                i32::default(),
+                bool::default(),
+                number_dps.clone(),
+            ))
+            .finish(),
+        Metric::build()
+            .name("hist")
+            .data_histogram(Histogram::new(i32::default(), hist_dps))
+            .finish(),
+        Metric::build()
+            .name("exphist")
+            .data_exponential_histogram(ExponentialHistogram::new(i32::default(), exp_dps))
+            .finish(),
+        Metric::build()
+            .name("summary")
+            .data_summary(Summary::new(summary_dps))
+            .finish(),
+    ])
+}
+
+async fn run_conditional_test(query: &str, attributes: &[Vec<KeyValue>], validate: impl Fn(&Data)) {
+    let input_metrics = generate_metric_all_types_batch_with_attrs(attributes);
+    let parser_result = OplParser::parse_with_options(query, default_parser_options()).unwrap();
+    let mut pipeline = Pipeline::try_new(parser_result.pipeline).unwrap();
+    let result = pipeline
+        .execute(otlp_to_otap(&OtlpProtoMessage::Metrics(input_metrics)))
+        .await
+        .unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics) = otap_to_otlp(&result) else {
+        panic!("invalid signal type {:?}", result.signal_type());
+    };
+
+    assert_eq!(metrics.resource_metrics.len(), 1);
+    assert_eq!(metrics.resource_metrics[0].scope_metrics.len(), 1);
+    let metrics = &metrics.resource_metrics[0].scope_metrics[0].metrics;
+    assert_eq!(metrics.len(), 5);
+
+    for metric in metrics {
+        let data = metric.data.as_ref().unwrap();
+        validate(data)
+    }
+}
+
+#[tokio::test]
+async fn test_conditional_on_data_point() {
+    let query = "metrics | apply data_points {
+        if (attributes[\"x\"] == \"foo\") {
+            set attributes[\"y\"] = \"bar\"
+        }
+    }";
+
+    let attributes = vec![
+        vec![KeyValue::new("x", AnyValue::new_string("foo"))],
+        vec![KeyValue::new("x", AnyValue::new_string("foo2"))],
+    ];
+    run_conditional_test(query, &attributes, |data| println!("TODO")).await;
 }
