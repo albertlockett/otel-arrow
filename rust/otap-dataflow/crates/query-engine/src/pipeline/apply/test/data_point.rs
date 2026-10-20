@@ -2438,7 +2438,6 @@ async fn test_filter_data_point_by_attribute_with_dict_u16_parent_ids() {
     assert_metrics_eq(metrics_result, expected);
 }
 
-// TODO this could use the new helper...
 /// Helper function for nested attribute assignment tests on metric data points.
 ///
 /// Runs the given query against all metric data point types, where each data point has the
