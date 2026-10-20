@@ -78,7 +78,7 @@ use crate::pipeline::expr::{
     ChildRecordKind, DataScope, RecordScope, RootParentStruct, ScopedExpr, ScopedValue,
 };
 use crate::pipeline::planner::{
-    AttributesIdentifier, ColumnAccessor, DataPointContext, RecordType,
+    AttributesIdentifier, ColumnAccessor, RecordType,
 };
 use crate::pipeline::project::anyval::{
     attempt_coerce_value_column_from_any_value_struct_column, fill_null_type_as_empty,
@@ -424,28 +424,40 @@ impl AssignPipelineStage {
     /// try to assign an all-null column to the root record batch. In practice, this just means
     /// removing the column from the record batch. This will return an error if it turns out the
     /// column is not nullable.
-    fn assign_null_root_column(
+    fn assign_null_record_column(
         &self,
         mut otap_batch: OtapArrowRecords,
+        eval_ctx: &EvalContext<'_>,
         dest_column_name: &str,
     ) -> Result<OtapArrowRecords> {
-        let root_batch = match otap_batch.root_record_batch() {
-            Some(rb) => rb,
-            None => {
-                // nothing to do
-                return Ok(otap_batch);
+        let target_rb_payload_type = match &self.record_type {
+            RecordType::Signal(_) => otap_batch.root_payload_type(),
+
+            RecordType::DataPoint(_) => {
+                // TODO no unwrap here -- we'd be doing something wrong if this was None
+                eval_ctx
+                    .data_point_type()
+                    .map(|dp_type| dp_type.payload_type())
+                    .unwrap()
             }
+            RecordType::Attributes => {
+                todo!()
+            }
+        };
+        let Some(target_rb) = otap_batch.get(target_rb_payload_type) else {
+            // nothing to do
+            return Ok(otap_batch);
         };
 
         // remove the column if it exists because it's all null result
         // Note: once again we're assuming that if the field is nullable that it is also optional
-        let schema = root_batch.schema_ref();
+        let schema = target_rb.schema_ref();
         let maybe_found_column = schema.fields().find(dest_column_name);
         if let Some((column_index, field)) = maybe_found_column {
             if field.is_nullable() {
-                let mut new_root_batch = root_batch.clone();
-                _ = new_root_batch.remove_column(column_index);
-                otap_batch.set(otap_batch.root_payload_type(), new_root_batch)?;
+                let mut new_rb = target_rb.clone();
+                _ = new_rb.remove_column(column_index);
+                otap_batch.set(target_rb_payload_type, new_rb)?;
             } else {
                 return Err(Error::ExecutionError {
                     cause: format!(
@@ -1160,17 +1172,16 @@ impl PipelineStage for AssignPipelineStage {
             match &self.dest_columns[i] {
                 ColumnAccessor::ColumnName(dest_col_name) => {
                     otap_batch = match eval_result {
-                        Some(eval_result) => {
-                            self.assign_to_record(
-                                otap_batch,
-                                eval_result,
-                                &eval_ctx,
-                                dest_scope,
-                                dest_col_name,
-                            )
-                            // self.assign_to_root(otap_batch, eval_result, dest_scope, dest_col_name)
+                        Some(eval_result) => self.assign_to_record(
+                            otap_batch,
+                            eval_result,
+                            &eval_ctx,
+                            dest_scope,
+                            dest_col_name,
+                        ),
+                        None => {
+                            self.assign_null_record_column(otap_batch, &eval_ctx, dest_col_name)
                         }
-                        None => self.assign_null_root_column(otap_batch, dest_col_name),
                     }?;
                 }
                 ColumnAccessor::StructCol(struct_col_name, field_name) => {
@@ -1516,9 +1527,11 @@ impl PipelineStage for AssignPipelineStage {
                                 dest_scope,
                                 dest_col_name,
                             ),
-                            None => {
-                                todo!()
-                            }
+                            None => self.assign_null_record_column(
+                                otap_batch,
+                                &eval_ctx,
+                                dest_col_name,
+                            ),
                         }?;
                     }
 

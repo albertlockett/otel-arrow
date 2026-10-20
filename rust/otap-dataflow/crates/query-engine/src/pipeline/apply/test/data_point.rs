@@ -5,6 +5,7 @@
 
 use otel_arrow_contrib_data_engine_kql_parser::Parser;
 use otel_arrow_dfe_pdata::{
+    OtapArrowRecords,
     proto::{
         OtlpProtoMessage,
         opentelemetry::{
@@ -25,7 +26,11 @@ use otel_arrow_dfe_pdata::{
 };
 use otel_arrow_dfe_query_engine_languages::opl::parser::OplParser;
 
-use crate::{error::Error, parser::default_parser_options, pipeline::Pipeline};
+use crate::{
+    error::Error,
+    parser::default_parser_options,
+    pipeline::Pipeline,
+};
 
 /// Helper function to compare the metrics & their data points on left right data.
 ///
@@ -1658,16 +1663,14 @@ async fn test_filter_data_point_by_nested_attribute() {
     .await;
 }
 
-/// Creates one metric of each type, each containing a single data point with the specified
-/// flags and values. It then applies the query to transform the batch, and runs validate
-/// function on the "data" field from each metric.
-async fn run_all_data_point_type_test(
+/// similar to [`run_all_data_point_type_test`] except that it accepts an additional function
+/// to validate the OTAP batch structure
+async fn evaluate_query_on_all_data_point_batch(
     query: &str,
     time_unix_nano: Option<u64>,
     flags: Option<u32>,
     attributes: Option<Vec<KeyValue>>,
-    validate: impl Fn(Data) -> (),
-) {
+) -> OtapArrowRecords {
     let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
         .unwrap()
         .pipeline;
@@ -1752,7 +1755,21 @@ async fn run_all_data_point_type_test(
     );
 
     let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(metrics_data));
-    let result = pipeline.execute(input_batch).await.unwrap();
+    pipeline.execute(input_batch).await.unwrap()
+}
+
+/// Creates one metric of each type, each containing a single data point with the specified
+/// flags and values. It then applies the query to transform the batch, and runs validate
+/// function on the "data" field from each metric.
+async fn run_all_data_point_type_test(
+    query: &str,
+    time_unix_nano: Option<u64>,
+    flags: Option<u32>,
+    attributes: Option<Vec<KeyValue>>,
+    validate: impl Fn(Data) -> (),
+) {
+    let result =
+        evaluate_query_on_all_data_point_batch(query, time_unix_nano, flags, attributes).await;
 
     let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
         panic!("invalid signal type")
@@ -1834,27 +1851,29 @@ async fn test_assign_metrics_data_point_one_type_only() {
     .await
 }
 
-/// Runs the query applying the pipeline a batch of metrics with a gauge metric
-/// with a single data point and calls validate on the gauge.
-async fn run_gauge_assign_test(
+async fn evaluate_query_on_gauge(
     query: &str,
+    flags: Option<u32>,
     attributes: Option<Vec<KeyValue>>,
-    validate: impl Fn(&Gauge) -> (),
-) {
+    int_value: Option<i64>,
+) -> OtapArrowRecords {
     let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
         .unwrap()
         .pipeline;
     let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
 
+    let mut dp_builder = NumberDataPoint::build()
+        .flags(flags.unwrap_or_default())
+        .attributes(attributes.clone().unwrap_or_default());
+    if let Some(int_value) = int_value {
+        dp_builder = dp_builder.value_int(int_value)
+    }
+
     let metrics = vec![
         Metric::build()
             .name("gauge_metric")
             .data_gauge(Gauge {
-                data_points: vec![
-                    NumberDataPoint::build()
-                        .attributes(attributes.clone().unwrap_or_default())
-                        .finish(),
-                ],
+                data_points: vec![dp_builder.finish()],
             })
             .finish(),
     ];
@@ -1872,8 +1891,19 @@ async fn run_gauge_assign_test(
     );
 
     let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(metrics_data));
-    let result = pipeline.execute(input_batch).await.unwrap();
+    pipeline.execute(input_batch).await.unwrap()
+}
 
+/// Runs the query applying the pipeline a batch of metrics with a gauge metric
+/// with a single data point and calls validate on the gauge.
+async fn run_gauge_assign_test(
+    query: &str,
+    flags: Option<u32>,
+    attributes: Option<Vec<KeyValue>>,
+    int_value: Option<i64>,
+    validate: impl Fn(&Gauge) -> (),
+) {
+    let result = evaluate_query_on_gauge(query, flags, attributes, int_value).await;
     let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
         panic!("invalid signal type")
     };
@@ -1905,7 +1935,7 @@ async fn test_assign_metrics_data_point_from_attribute_v2() {
         set int_value = attributes[\"x\"]
     }";
     let attrs = vec![KeyValue::new("x", AnyValue::new_int(5))];
-    run_gauge_assign_test(query, Some(attrs), |gauge| {
+    run_gauge_assign_test(query, None, Some(attrs), Some(10), |gauge| {
         let value = gauge.data_points[0].value.unwrap();
         assert_eq!(value, Value::AsInt(5));
     })
@@ -1918,7 +1948,7 @@ async fn test_assign_metrics_data_point_from_root_parent_attributes() {
         set int_value = resource.attributes[\"x\"]
     }";
     let attrs = vec![KeyValue::new("x", AnyValue::new_int(5))];
-    run_gauge_assign_test(query, Some(attrs.clone()), |gauge| {
+    run_gauge_assign_test(query, None, Some(attrs.clone()), None, |gauge| {
         let value = gauge.data_points[0].value.unwrap();
         assert_eq!(value, Value::AsInt(5));
     })
@@ -1927,20 +1957,21 @@ async fn test_assign_metrics_data_point_from_root_parent_attributes() {
     let query = "gauges | apply data_points {
         set int_value = instrumentation_scope.attributes[\"x\"]
     }";
-    run_gauge_assign_test(query, Some(attrs), |gauge| {
+    run_gauge_assign_test(query, None, Some(attrs), None, |gauge| {
         let value = gauge.data_points[0].value.unwrap();
         assert_eq!(value, Value::AsInt(5));
     })
     .await;
 }
 
-#[ignore]
 #[tokio::test]
-async fn test_assign_metrics_data_point_must_to_null() {
-    todo!()
+async fn test_assign_metrics_data_point_to_null() {
+    let query = "gauges | apply data_points { set int_value = attributes[\"missing\"] }";
+    let result = evaluate_query_on_gauge(query, None, None, Some(5)).await;
+    let dp_rb = result.get(ArrowPayloadType::NumberDataPoints).unwrap();
+    assert!(dp_rb.column_by_name(consts::INT_VALUE).is_none());
 }
 
-// TODO - assign one dp type specifically, etc.
 // TODO - assign invalid field name (never valid name)
 // TODO - assign invalid field name for only some dp type
 
@@ -2763,12 +2794,6 @@ async fn test_not_supported_queries_return_error() {
                 if (flags > 0) {
                     drop
                 }
-            }",
-        },
-        // assignment to metric data point fields or attributes is not yet supported
-        TestCase {
-            query: "metrics | apply data_points {
-                set flags = 0
             }",
         },
         // nested apply pipeline to modify data point attributes is not yet supported
