@@ -14,7 +14,7 @@ use otel_arrow_dfe_pdata::{
                 Exemplar, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Histogram,
                 HistogramDataPoint, Metric, MetricsData, NumberDataPoint, ResourceMetrics,
                 ScopeMetrics, Sum, Summary, SummaryDataPoint,
-                exponential_histogram_data_point::Buckets, metric::Data,
+                exponential_histogram_data_point::Buckets, metric::Data, number_data_point::Value,
                 summary_data_point::ValueAtQuantile,
             },
             resource::v1::Resource,
@@ -1739,7 +1739,19 @@ async fn run_all_data_point_type_test(
             .finish(),
     ];
 
-    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(to_metrics_data(metrics)));
+    let mut metrics_data = to_metrics_data(metrics);
+    metrics_data.resource_metrics[0].resource = Some(
+        Resource::build()
+            .attributes(attributes.clone().unwrap_or_default())
+            .finish(),
+    );
+    metrics_data.resource_metrics[0].scope_metrics[0].scope = Some(
+        InstrumentationScope::build()
+            .attributes(attributes.clone().unwrap_or_default())
+            .finish(),
+    );
+
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(metrics_data));
     let result = pipeline.execute(input_batch).await.unwrap();
 
     let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
@@ -1765,7 +1777,7 @@ async fn run_all_data_point_type_test(
 }
 
 #[tokio::test]
-async fn test_assign_metrics_data_point_field_from_constant() {
+async fn test_assign_metrics_data_point_all_field_from_constant() {
     let query = "metrics | apply data_points {
         set flags = 5
     }";
@@ -1783,7 +1795,7 @@ async fn test_assign_metrics_data_point_field_from_constant() {
 }
 
 #[tokio::test]
-async fn test_assign_metrics_data_point_from_other_root_scoped_field() {
+async fn test_assign_metrics_data_point_all_from_other_root_scoped_field() {
     let query = "metrics | apply data_points {
         set start_time_unix_nano = time_unix_nano
     }";
@@ -1800,32 +1812,126 @@ async fn test_assign_metrics_data_point_from_other_root_scoped_field() {
     .await
 }
 
-#[ignore = "auto int coercion not working correctly for this case"]
 #[tokio::test]
-async fn test_assign_metrics_data_point_from_attribute() {
-    // TODO - shouldn't this be automatically coerced correctly?
-    let query = "metrics | apply data_points {
-        set flags = attributes[\"x\"]
+async fn test_assign_metrics_data_point_one_type_only() {
+    let query = "gauges | apply data_points {
+        set flags = 5
     }";
-    let attrs = vec![KeyValue::new("x", AnyValue::new_int(5))];
-    run_all_data_point_type_test(query, None, Some(6), Some(attrs), |data| {
-        let new_flags = match &data {
-            Data::Gauge(g) => g.data_points[0].flags,
+
+    run_all_data_point_type_test(query, None, Some(6), None, |data| {
+        let flags = match &data {
+            Data::Gauge(g) => {
+                assert_eq!(g.data_points[0].flags, 5);
+                return;
+            }
             Data::Sum(s) => s.data_points[0].flags,
             Data::Histogram(h) => h.data_points[0].flags,
             Data::ExponentialHistogram(e) => e.data_points[0].flags,
             Data::Summary(s) => s.data_points[0].flags,
         };
-        assert_eq!(new_flags, 5);
+        assert_eq!(flags, 6);
     })
     .await
 }
 
-#[ignore]
+/// Runs the query applying the pipeline a batch of metrics with a gauge metric
+/// with a single data point and calls validate on the gauge.
+async fn run_gauge_assign_test(
+    query: &str,
+    attributes: Option<Vec<KeyValue>>,
+    validate: impl Fn(&Gauge) -> (),
+) {
+    let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
+        .unwrap()
+        .pipeline;
+    let mut pipeline = Pipeline::try_new(pipeline_expr).unwrap();
+
+    let metrics = vec![
+        Metric::build()
+            .name("gauge_metric")
+            .data_gauge(Gauge {
+                data_points: vec![
+                    NumberDataPoint::build()
+                        .attributes(attributes.clone().unwrap_or_default())
+                        .finish(),
+                ],
+            })
+            .finish(),
+    ];
+
+    let mut metrics_data = to_metrics_data(metrics);
+    metrics_data.resource_metrics[0].resource = Some(
+        Resource::build()
+            .attributes(attributes.clone().unwrap_or_default())
+            .finish(),
+    );
+    metrics_data.resource_metrics[0].scope_metrics[0].scope = Some(
+        InstrumentationScope::build()
+            .attributes(attributes.clone().unwrap_or_default())
+            .finish(),
+    );
+
+    let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(metrics_data));
+    let result = pipeline.execute(input_batch).await.unwrap();
+
+    let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
+        panic!("invalid signal type")
+    };
+
+    assert_eq!(metrics_result.resource_metrics.len(), 1);
+    assert_eq!(metrics_result.resource_metrics[0].scope_metrics.len(), 1);
+    assert_eq!(
+        metrics_result.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .len(),
+        1
+    );
+
+    for metric in metrics_result.resource_metrics[0].scope_metrics[0]
+        .metrics
+        .iter()
+    {
+        let data = metric.data.clone().unwrap();
+        let Data::Gauge(g) = &data else {
+            panic!("invalid metric data type {data:?}");
+        };
+        validate(g)
+    }
+}
+
+#[tokio::test]
+async fn test_assign_metrics_data_point_from_attribute_v2() {
+    let query = "gauges | apply data_points {
+        set int_value = attributes[\"x\"]
+    }";
+    let attrs = vec![KeyValue::new("x", AnyValue::new_int(5))];
+    run_gauge_assign_test(query, Some(attrs), |gauge| {
+        let value = gauge.data_points[0].value.unwrap();
+        assert_eq!(value, Value::AsInt(5));
+    })
+    .await
+}
+
 #[tokio::test]
 async fn test_assign_metrics_data_point_from_root_parent_attributes() {
-    todo!("resource");
-    todo!("scope");
+    let query = "gauges | apply data_points {
+        set int_value = resource.attributes[\"x\"]
+    }";
+    let attrs = vec![KeyValue::new("x", AnyValue::new_int(5))];
+    run_gauge_assign_test(query, Some(attrs.clone()), |gauge| {
+        let value = gauge.data_points[0].value.unwrap();
+        assert_eq!(value, Value::AsInt(5));
+    })
+    .await;
+
+    let query = "gauges | apply data_points {
+        set int_value = instrumentation_scope.attributes[\"x\"]
+    }";
+    run_gauge_assign_test(query, Some(attrs), |gauge| {
+        let value = gauge.data_points[0].value.unwrap();
+        assert_eq!(value, Value::AsInt(5));
+    })
+    .await;
 }
 
 #[ignore]

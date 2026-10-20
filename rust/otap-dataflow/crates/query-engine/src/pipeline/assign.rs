@@ -64,15 +64,15 @@ use otel_arrow_dfe_pdata::schema::{consts, get_field_metadata, update_field_meta
 
 use crate::error::{Error, Result};
 use crate::pipeline::expr::eval::{EvalContext, align_value_to_record, scoped_value_to_join_input};
-use crate::pipeline::expr::join::JoinInput;
 use crate::pipeline::expr::join::{
     AttributeToDifferentAttributeJoin, AttributeToSameAttributeJoin, JoinExec,
     RecordAttrsToRecordJoin, RecordToAttributesJoin,
 };
+use crate::pipeline::expr::join::{ChildRecordToNonRecordAttrsJoin, JoinInput};
 use crate::pipeline::expr::planner::PlannedOp;
 use crate::pipeline::expr::types::{
     ExprLogicalType, MetricDataPointType, attribute_field_type, data_point_field_type,
-    nested_struct_field_type, root_field_supports_dict_encoding, root_field_type,
+    field_supports_dict_encoding, nested_struct_field_type, root_field_type,
 };
 use crate::pipeline::expr::{
     ChildRecordKind, DataScope, RecordScope, RootParentStruct, ScopedExpr, ScopedValue,
@@ -264,8 +264,10 @@ impl AssignPipelineStage {
         // produced as an int64 by default, however the expression tree doesn't actually specify
         // the type, so we assume the type should have matched the expected type here and cast it
         let mut eval_result_column_type = scoped_value.values.data_type();
-        // if scoped_value.scope == DataScope::StaticScalar
-        if eval_result_column_type.is_integer() && expected_column_data_type.is_integer() {
+        if scoped_value.scope == DataScope::StaticScalar
+            && eval_result_column_type.is_integer()
+            && expected_column_data_type.is_integer()
+        {
             scoped_value.values = scoped_value
                 .values
                 .cast_to(&expected_column_data_type, None)?;
@@ -276,13 +278,18 @@ impl AssignPipelineStage {
         let mut type_compatible = expected_column_data_type == eval_result_column_type;
 
         // if it's dict encoded, check if the dict values match the expected type
-        let column_supports_dict_encoding = root_field_supports_dict_encoding(dest_column_name);
+        let column_supports_dict_encoding = field_supports_dict_encoding(dest_column_name);
         if !type_compatible
-            && column_supports_dict_encoding
             && let DataType::Dictionary(_, dict_val_type) = &eval_result_column_type
             && dict_val_type.as_ref() == &expected_column_data_type
         {
-            type_compatible = true
+            // type is compatible with assignment
+            type_compatible = true;
+
+            // if dict encoding isn't supported for this column, simply remove the dict encoding
+            if !column_supports_dict_encoding {
+                scoped_value.values = scoped_value.values.cast_to(dict_val_type, None)?;
+            }
         }
 
         // if result is not type compatible, return error
@@ -303,36 +310,44 @@ impl AssignPipelineStage {
             target_rb.num_rows(),
         )?;
 
-        // align the rows in the new values with the rows in the root batch, if not already aligned
-        let already_aligned = scoped_value.scope.is_scalar() || scoped_value.scope == *dest_scope;
+        // if the row-order of the results is from some attributes record batch, we will need to
+        // align the rows to the assignment target.
+        let source_scope_attrs_id = match scoped_value.scope {
+            DataScope::Attribute(attrs_id, _, _) | DataScope::AttributesAll(attrs_id) => {
+                Some(attrs_id)
+            }
+            // already aligned to the record / scalar, no alignment needed ..
+            DataScope::Record(_) | DataScope::RootParent(_) | DataScope::StaticScalar => None,
+        };
 
-        if !already_aligned {
+        if let Some(attrs_id) = source_scope_attrs_id {
             // if we're here, it means we have received a column value that has the row order
-            // of something other than the root attribute batch, basically meaning the result was
-            // computed from attributes. We'll need to join the result's values column to the root
+            // of something other than the target attribute batch, basically meaning the result was
+            // computed from attributes. We'll need to join the result's values column to the target
             // column to get the values in the correct order ...
 
-            let DataScope::Attribute(attrs_id, _, _) = &scoped_value.scope else {
-                // safety: if the data_scope were anything other than attributes, we'd have taken
-                // the if branch (not the else branch) above when we checked if the data was
-                // already aligned
-                unreachable!("unexpected data_scope")
-            };
-
-            // create a JoinExec implementation that computes joined indices of values to root on
-            // `root.id == attrs.parent_id` and use this to take rows from the result in order.
-            let join_exec = RecordToAttributesJoin::new(*attrs_id);
+            // compute join indices needed to align the eval result with the assignment target
             let eval_result = scoped_value_to_join_input(scoped_value, &otap_batch)?;
-            let vals_take_indices = join_exec.rows_to_take(
-                &JoinInput::new(
-                    ColumnarValue::Scalar(ScalarValue::Null), // empty placeholder,
-                    Rc::new(dest_scope.clone()),
-                    target_rb,
-                ),
-                &eval_result,
-                &OtapArrowRecords::Logs(Logs::default()), // empty placeholder
-            )?;
+            let left_input = JoinInput::new(
+                ColumnarValue::Scalar(ScalarValue::Null), // empty placeholder,
+                Rc::new(dest_scope.clone()),
+                target_rb,
+            );
+            let vals_take_indices = match (dest_scope, attrs_id) {
+                (
+                    DataScope::Record(RecordScope::Child(_)),
+                    AttributesIdentifier::NonRecord(attrs_payload_type),
+                ) => {
+                    let join_exec = ChildRecordToNonRecordAttrsJoin::new(attrs_payload_type);
+                    join_exec.rows_to_take(&left_input, &eval_result, &otap_batch)
+                }
+                _ => {
+                    let join_exec = RecordToAttributesJoin::new(attrs_id);
+                    join_exec.rows_to_take(&left_input, &eval_result, &otap_batch)
+                }
+            }?;
 
+            // take the values in the row order of the assignment target
             values = take(&values, &vals_take_indices, None)?;
         };
 
