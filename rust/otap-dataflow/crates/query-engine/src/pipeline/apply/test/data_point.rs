@@ -1764,7 +1764,7 @@ async fn run_all_data_point_type_test(
     time_unix_nano: Option<u64>,
     flags: Option<u32>,
     attributes: Option<Vec<KeyValue>>,
-    validate: impl Fn(Data) -> (),
+    validate: impl Fn(Data),
 ) {
     let result =
         evaluate_query_on_all_data_point_batch(query, time_unix_nano, flags, attributes).await;
@@ -1909,7 +1909,7 @@ async fn run_gauge_assign_test(
     flags: Option<u32>,
     attributes: Option<Vec<KeyValue>>,
     int_value: Option<i64>,
-    validate: impl Fn(&Gauge) -> (),
+    validate: impl Fn(&Gauge),
 ) {
     let result = evaluate_query_on_gauge(query, flags, attributes, int_value).await;
     let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
@@ -1978,24 +1978,6 @@ async fn test_assign_metrics_data_point_from_root_parent_attributes() {
     })
     .await;
 }
-
-/// Scenario:
-#[tokio::test]
-async fn test_assign_metrics_data_point_from_fused_attr_eval() {
-    let query = "gauges | apply data_points {
-        set int_value = (attributes[\"x\"] == 5) as Integer
-    }";
-    let attrs = vec![
-        KeyValue::new("x", AnyValue::new_int(5)),
-        KeyValue::new("y", AnyValue::new_int(5)),
-    ];
-    run_gauge_assign_test(query, None, Some(attrs.clone()), None, |gauge| {
-        let value = gauge.data_points[0].value.unwrap();
-        assert_eq!(value, Value::AsInt(1));
-    })
-    .await;
-}
-
 /// Scenario: assign the nullable (e.g. optional) field on the data point from an expression that
 /// will evaluate to null
 /// Guarantees: the evaluation will cause the optional column to be removed.

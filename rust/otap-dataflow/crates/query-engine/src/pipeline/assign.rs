@@ -63,12 +63,14 @@ use otel_arrow_dfe_pdata::schema::consts::metadata;
 use otel_arrow_dfe_pdata::schema::{consts, get_field_metadata, update_field_metadata};
 
 use crate::error::{Error, Result};
-use crate::pipeline::expr::eval::{EvalContext, align_value_to_record, scoped_value_to_join_input};
+use crate::pipeline::expr::eval::{
+    EvalContext, align_attrs_to_record, align_value_to_record, scoped_value_to_join_input,
+};
+use crate::pipeline::expr::join::JoinInput;
 use crate::pipeline::expr::join::{
     AttributeToDifferentAttributeJoin, AttributeToSameAttributeJoin, JoinExec,
     RecordAttrsToRecordJoin, RecordToAttributesJoin,
 };
-use crate::pipeline::expr::join::{ChildRecordToNonRecordAttrsJoin, JoinInput};
 use crate::pipeline::expr::planner::PlannedOp;
 use crate::pipeline::expr::types::{
     ExprLogicalType, MetricDataPointType, attribute_field_type, data_point_field_type,
@@ -303,14 +305,6 @@ impl AssignPipelineStage {
             });
         }
 
-        // convert the expression evaluation result to an array, with the correct dict encoding if
-        // the destination column supports it
-        let mut values = eval_result_to_array(
-            &scoped_value.values,
-            column_supports_dict_encoding,
-            target_rb.num_rows(),
-        )?;
-
         // if the row-order of the results is from some attributes record batch, we will need to
         // align the rows to the assignment target.
         let source_scope_attrs_id = match scoped_value.scope {
@@ -326,36 +320,16 @@ impl AssignPipelineStage {
             // of something other than the target attribute batch, basically meaning the result was
             // computed from attributes. We'll need to join the result's values column to the target
             // column to get the values in the correct order ...
+            scoped_value = align_attrs_to_record(scoped_value, attrs_id, &otap_batch, eval_ctx)?
+        }
 
-            // compute join indices needed to align the eval result with the assignment target
-            let eval_result = scoped_value_to_join_input(scoped_value, &otap_batch)?;
-            let left_input = JoinInput::new(
-                ColumnarValue::Scalar(ScalarValue::Null), // empty placeholder,
-                Rc::new(dest_scope.clone()),
-                target_rb,
-            );
-
-            // TODO - if the attribute scope was actually AttributesAll(_), there's actually a
-            // different join order that's needed here.
-            // TODO We might want to consider if there's a different function that should be used
-            // (e.g. something general from eval?)
-            let vals_take_indices = match (dest_scope, attrs_id) {
-                (
-                    DataScope::Record(RecordScope::Child(_)),
-                    AttributesIdentifier::NonRecord(attrs_payload_type),
-                ) => {
-                    let join_exec = ChildRecordToNonRecordAttrsJoin::new(attrs_payload_type);
-                    join_exec.rows_to_take(&left_input, &eval_result, &otap_batch)
-                }
-                _ => {
-                    let join_exec = RecordToAttributesJoin::new(attrs_id);
-                    join_exec.rows_to_take(&left_input, &eval_result, &otap_batch)
-                }
-            }?;
-
-            // take the values in the row order of the assignment target
-            values = take(&values, &vals_take_indices, None)?;
-        };
+        // convert the expression evaluation result to an array, with the correct dict encoding if
+        // the destination column supports it
+        let values = eval_result_to_array(
+            &scoped_value.values,
+            column_supports_dict_encoding,
+            target_rb.num_rows(),
+        )?;
 
         // replace the root record batch with the new one
         otap_batch.set(
@@ -438,7 +412,7 @@ impl AssignPipelineStage {
     ) -> Result<OtapArrowRecords> {
         let target_rb_payload_type = match &self.record_type {
             RecordType::Signal(_) => otap_batch.root_payload_type(),
-            RecordType::DataPoint(dp_ctx) => eval_ctx
+            RecordType::DataPoint(_) => eval_ctx
                 .data_point_type()
                 .map(|dp_type| dp_type.payload_type())
                 .ok_or_else(|| Error::ExecutionError {

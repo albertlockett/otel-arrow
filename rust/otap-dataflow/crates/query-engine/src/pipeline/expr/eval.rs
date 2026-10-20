@@ -1256,7 +1256,7 @@ fn maybe_downcast_dicts(batch: RecordBatch, opts: &ProjectionOptions) -> Result<
 
 /// Converts the row order of the passed value to match the record batch associated with
 /// the attributes identifier.
-fn align_attrs_to_record(
+pub fn align_attrs_to_record(
     value: ScopedValue,
     attrs_id: AttributesIdentifier,
     otap_batch: &OtapArrowRecords,
