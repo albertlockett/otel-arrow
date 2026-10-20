@@ -192,6 +192,7 @@ impl AssignPipelineStage {
         })
     }
 
+    /// Assign the result of the expression evaluation to a column on the target record batch.
     fn assign_to_record(
         &self,
         mut otap_batch: OtapArrowRecords,
@@ -206,20 +207,27 @@ impl AssignPipelineStage {
                 root_field_type(dest_column_name, signal_ctx),
             ),
             RecordType::DataPoint(dp_ctx) => (
-                // TODO no unwrap here -- we'd be doing something wrong if this was None
                 eval_ctx
                     .data_point_type()
                     .map(|dp_type| dp_type.payload_type())
-                    .unwrap(),
+                    .ok_or_else(|| Error::ExecutionError {
+                        cause: "missing data point type in eval context in assignment".into(),
+                    })?,
                 data_point_field_type(dest_column_name, dp_ctx),
             ),
             RecordType::Attributes => {
-                todo!()
+                // The caller shouldn't have used this method, and should have instead used
+                // self::assign_to_attributes. return error ot be defensive.
+                return Err(Error::ExecutionError {
+                    cause: "cannot assign to attributes as record".into(),
+                });
             }
         };
 
-        // TODO - not sure if we can unwrap this? It's validated in planning
-        let expected_column_logical_type = expected_column_logical_type.unwrap();
+        let expected_column_logical_type =
+            expected_column_logical_type.ok_or_else(|| Error::ExecutionError {
+                cause: format!("column not found {dest_column_name:?}"),
+            })?;
 
         let Some(target_rb) = otap_batch.get(target_rb_payload_type) else {
             // nothing to do
@@ -230,8 +238,6 @@ impl AssignPipelineStage {
         // concrete typed array that needs wrapping into an AnyValue struct, or it may already
         // be an AnyValue struct that can be assigned directly.
         if expected_column_logical_type == ExprLogicalType::AnyValue {
-            // TODO - should we _validate_ that the root_type is actually root here? (I think it's
-            // impossible for it not to be unless we screw around with the type defs)
             return self.assign_any_value_to_root(
                 otap_batch,
                 scoped_value,
@@ -240,14 +246,12 @@ impl AssignPipelineStage {
             );
         }
 
-        // TODO - this is a big assumption here wrt to safety that not sure if I trust ...
         let expected_column_data_type = expected_column_logical_type
             .datatype()
             // safety: this will only return None if the logical data type for the field is
             // ambiguous, which is the case for attributes/AnyValues, but we've handled AnyValue
             // above, so the remaining types are all concrete and safe to expect here
             .expect("dest column data type");
-
         // if we've received an AnyValue as the assignment source, but the destination is not an
         // AnyValue, we coerce attempt to coerce it into a single value
         if let ColumnarValue::Array(values) = &scoped_value.values
@@ -281,7 +285,6 @@ impl AssignPipelineStage {
             && let DataType::Dictionary(_, dict_val_type) = &eval_result_column_type
             && dict_val_type.as_ref() == &expected_column_data_type
         {
-            // type is compatible with assignment
             type_compatible = true;
 
             // if dict encoding isn't supported for this column, simply remove the dict encoding
@@ -424,7 +427,7 @@ impl AssignPipelineStage {
         Ok(otap_batch)
     }
 
-    /// try to assign an all-null column to the root record batch. In practice, this just means
+    /// try to assign an all-null column to the target record batch. In practice, this just means
     /// removing the column from the record batch. This will return an error if it turns out the
     /// column is not nullable.
     fn assign_null_record_column(
@@ -435,16 +438,18 @@ impl AssignPipelineStage {
     ) -> Result<OtapArrowRecords> {
         let target_rb_payload_type = match &self.record_type {
             RecordType::Signal(_) => otap_batch.root_payload_type(),
-
-            RecordType::DataPoint(_) => {
-                // TODO no unwrap here -- we'd be doing something wrong if this was None
-                eval_ctx
-                    .data_point_type()
-                    .map(|dp_type| dp_type.payload_type())
-                    .unwrap()
-            }
+            RecordType::DataPoint(dp_ctx) => eval_ctx
+                .data_point_type()
+                .map(|dp_type| dp_type.payload_type())
+                .ok_or_else(|| Error::ExecutionError {
+                    cause: "missing data point type in eval context in assignment".into(),
+                })?,
             RecordType::Attributes => {
-                todo!()
+                // The caller shouldn't have used this method, and should have instead used
+                // self::assign_to_attributes. return error ot be defensive.
+                return Err(Error::ExecutionError {
+                    cause: "cannot assign to attributes as record".into(),
+                });
             }
         };
         let Some(target_rb) = otap_batch.get(target_rb_payload_type) else {
