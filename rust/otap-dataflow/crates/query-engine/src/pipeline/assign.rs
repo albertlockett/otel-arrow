@@ -2148,18 +2148,13 @@ fn validate_assign(
                         query_location: dest_query_location.cloned(),
                     })?
                 }
-                RecordType::DataPoint(dp_ctx) => {
-                    // TODO - should we have test coverage for this?
-                    // TODO - will the error message be ugly?
-                    data_point_field_type(col_name, dp_ctx).ok_or_else(|| {
-                        Error::InvalidPipelineError {
-                            cause: format!(
-                                "cannot assign field '{col_name}' for data point type {dp_ctx:?}"
-                            ),
-                            query_location: dest_query_location.cloned(),
-                        }
-                    })?
-                }
+                RecordType::DataPoint(dp_ctx) => data_point_field_type(col_name, dp_ctx)
+                    .ok_or_else(|| Error::InvalidPipelineError {
+                        cause: format!(
+                            "cannot assign field '{col_name}' to data point type {dp_ctx:?}"
+                        ),
+                        query_location: dest_query_location.cloned(),
+                    })?,
             };
 
             let source_type = &source_plan.expr_type;

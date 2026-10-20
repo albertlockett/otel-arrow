@@ -26,7 +26,11 @@ use otel_arrow_dfe_pdata::{
 };
 use otel_arrow_dfe_query_engine_languages::opl::parser::OplParser;
 
-use crate::{error::Error, parser::default_parser_options, pipeline::Pipeline};
+use crate::{
+    error::{Error, Result},
+    parser::default_parser_options,
+    pipeline::Pipeline,
+};
 
 /// Helper function to compare the metrics & their data points on left right data.
 ///
@@ -1864,7 +1868,7 @@ async fn evaluate_query_on_gauge(
     flags: Option<u32>,
     attributes: Option<Vec<KeyValue>>,
     int_value: Option<i64>,
-) -> OtapArrowRecords {
+) -> Result<OtapArrowRecords> {
     let pipeline_expr = OplParser::parse_with_options(query, default_parser_options())
         .unwrap()
         .pipeline;
@@ -1899,7 +1903,7 @@ async fn evaluate_query_on_gauge(
     );
 
     let input_batch = otlp_to_otap(&OtlpProtoMessage::Metrics(metrics_data));
-    pipeline.execute(input_batch).await.unwrap()
+    pipeline.execute(input_batch).await
 }
 
 /// Runs the query applying the pipeline a batch of metrics with a gauge metric with a single data
@@ -1911,7 +1915,9 @@ async fn run_gauge_assign_test(
     int_value: Option<i64>,
     validate: impl Fn(&Gauge),
 ) {
-    let result = evaluate_query_on_gauge(query, flags, attributes, int_value).await;
+    let result = evaluate_query_on_gauge(query, flags, attributes, int_value)
+        .await
+        .unwrap();
     let OtlpProtoMessage::Metrics(metrics_result) = otap_to_otlp(&result) else {
         panic!("invalid signal type")
     };
@@ -1978,19 +1984,69 @@ async fn test_assign_metrics_data_point_from_root_parent_attributes() {
     })
     .await;
 }
+
 /// Scenario: assign the nullable (e.g. optional) field on the data point from an expression that
 /// will evaluate to null
 /// Guarantees: the evaluation will cause the optional column to be removed.
 #[tokio::test]
 async fn test_assign_metrics_data_point_to_null() {
     let query = "gauges | apply data_points { set int_value = attributes[\"missing\"] }";
-    let result = evaluate_query_on_gauge(query, None, None, Some(5)).await;
+    let result = evaluate_query_on_gauge(query, None, None, Some(5))
+        .await
+        .unwrap();
     let dp_rb = result.get(ArrowPayloadType::NumberDataPoints).unwrap();
     assert!(dp_rb.column_by_name(consts::INT_VALUE).is_none());
 }
 
-// TODO - assign invalid field name (never valid name)
-// TODO - assign invalid field name for only some dp type
+/// Scenario: assign metric data points with a field name which is not valid
+/// Guarantees: an error explaining why the pipeline cannot be evaluated is produced
+#[tokio::test]
+async fn test_assign_metrics_data_point_invalid_field_name() {
+    let query = "metrics | apply data_points { set invalid_field = 5 }";
+    let error = evaluate_query_on_gauge(query, None, None, Some(5))
+        .await
+        .unwrap_err();
+
+    let err_message = error.to_string();
+    assert!(
+        err_message.contains("cannot assign field 'invalid_field' to data point type"),
+        "unexpected error message {err_message:?}",
+    )
+}
+
+/// Scenario: assign metric data points with a field name which is only valid on some data point
+/// types but not all
+/// Guarantees: an error explaining why the pipeline cannot be evaluated is produced
+#[tokio::test]
+async fn test_assign_metrics_data_point_invalid_field_name_for_all_dp_types() {
+    let query = "metrics | apply data_points { set int_value = 5 }";
+    let error = evaluate_query_on_gauge(query, None, None, Some(5))
+        .await
+        .unwrap_err();
+
+    let err_message = error.to_string();
+    assert!(
+        err_message.contains("cannot assign field 'int_value' to data point type"),
+        "unexpected error message {err_message:?}",
+    )
+}
+
+/// Scenario: assign metric data points with a field name which is not valid for the specified
+/// data piont type
+/// Guarantees: an error explaining why the pipeline cannot be evaluated is produced
+#[tokio::test]
+async fn test_assign_metrics_data_point_invalid_field_name_single_dp_type() {
+    let query = "gauges | apply data_points { set sum = 5 }";
+    let error = evaluate_query_on_gauge(query, None, None, Some(5))
+        .await
+        .unwrap_err();
+
+    let err_message = error.to_string();
+    assert!(
+        err_message.contains("cannot assign field 'sum' to data point type"),
+        "unexpected error message {err_message:?}",
+    )
+}
 
 /// In a handful of tests below, we want to ensure that values are assigned to all data point types
 /// with the correct key / value from sources involving various types of expressions. This helper

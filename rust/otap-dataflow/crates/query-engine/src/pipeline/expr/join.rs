@@ -1051,12 +1051,12 @@ impl JoinExec for RecordToAttributesJoin {
 /// This is used when a data-point expression references resource or scope attributes, which are
 /// grandparents of the data point. The resulting row order is that of the left side (the child
 /// record).
-pub struct ChildRecordToNonRecordAttrsJoin {
+struct ChildRecordToNonRecordAttrsJoin {
     attrs_payload_type: ArrowPayloadType,
 }
 
 impl ChildRecordToNonRecordAttrsJoin {
-    pub fn new(attrs_payload_type: ArrowPayloadType) -> Self {
+    fn new(attrs_payload_type: ArrowPayloadType) -> Self {
         Self { attrs_payload_type }
     }
 }
