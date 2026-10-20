@@ -77,9 +77,7 @@ use crate::pipeline::expr::types::{
 use crate::pipeline::expr::{
     ChildRecordKind, DataScope, RecordScope, RootParentStruct, ScopedExpr, ScopedValue,
 };
-use crate::pipeline::planner::{
-    AttributesIdentifier, ColumnAccessor, RecordType,
-};
+use crate::pipeline::planner::{AttributesIdentifier, ColumnAccessor, RecordType};
 use crate::pipeline::project::anyval::{
     attempt_coerce_value_column_from_any_value_struct_column, fill_null_type_as_empty,
     is_any_value_data_type, wrap_as_any_value_struct,
@@ -333,6 +331,11 @@ impl AssignPipelineStage {
                 Rc::new(dest_scope.clone()),
                 target_rb,
             );
+
+            // TODO - if the attribute scope was actually AttributesAll(_), there's actually a
+            // different join order that's needed here.
+            // TODO We might want to consider if there's a different function that should be used
+            // (e.g. something general from eval?)
             let vals_take_indices = match (dest_scope, attrs_id) {
                 (
                     DataScope::Record(RecordScope::Child(_)),
@@ -1527,11 +1530,9 @@ impl PipelineStage for AssignPipelineStage {
                                 dest_scope,
                                 dest_col_name,
                             ),
-                            None => self.assign_null_record_column(
-                                otap_batch,
-                                &eval_ctx,
-                                dest_col_name,
-                            ),
+                            None => {
+                                self.assign_null_record_column(otap_batch, &eval_ctx, dest_col_name)
+                            }
                         }?;
                     }
 

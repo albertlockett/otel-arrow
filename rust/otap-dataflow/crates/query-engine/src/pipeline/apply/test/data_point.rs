@@ -26,11 +26,7 @@ use otel_arrow_dfe_pdata::{
 };
 use otel_arrow_dfe_query_engine_languages::opl::parser::OplParser;
 
-use crate::{
-    error::Error,
-    parser::default_parser_options,
-    pipeline::Pipeline,
-};
+use crate::{error::Error, parser::default_parser_options, pipeline::Pipeline};
 
 /// Helper function to compare the metrics & their data points on left right data.
 ///
@@ -1663,8 +1659,10 @@ async fn test_filter_data_point_by_nested_attribute() {
     .await;
 }
 
-/// similar to [`run_all_data_point_type_test`] except that it accepts an additional function
-/// to validate the OTAP batch structure
+/// Creates a single OTAP batch of metrics, containing a single metric of each type each containing
+/// one single data point with the specified flags and values. It then applies the query and returns
+/// the resulting OTAP batch. This can be used to ensure the query-engine is correctly applied to
+/// all data point types.
 async fn evaluate_query_on_all_data_point_batch(
     query: &str,
     time_unix_nano: Option<u64>,
@@ -1793,6 +1791,8 @@ async fn run_all_data_point_type_test(
     }
 }
 
+/// Scenario: assign a field to all metric data point types from a constant
+/// Guarantees: the query-engine supports this type of assignment where the result will be a scalar
 #[tokio::test]
 async fn test_assign_metrics_data_point_all_field_from_constant() {
     let query = "metrics | apply data_points {
@@ -1811,24 +1811,9 @@ async fn test_assign_metrics_data_point_all_field_from_constant() {
     .await
 }
 
-#[tokio::test]
-async fn test_assign_metrics_data_point_all_from_other_root_scoped_field() {
-    let query = "metrics | apply data_points {
-        set start_time_unix_nano = time_unix_nano
-    }";
-    run_all_data_point_type_test(query, Some(5), Some(6), None, |data| {
-        let new_start_ts = match &data {
-            Data::Gauge(g) => g.data_points[0].start_time_unix_nano,
-            Data::Sum(s) => s.data_points[0].start_time_unix_nano,
-            Data::Histogram(h) => h.data_points[0].start_time_unix_nano,
-            Data::ExponentialHistogram(e) => e.data_points[0].start_time_unix_nano,
-            Data::Summary(s) => s.data_points[0].start_time_unix_nano,
-        };
-        assert_eq!(new_start_ts, 5);
-    })
-    .await
-}
-
+/// Scenario: assign the value of a field, which is supported on all data point types, to only a
+/// single type of metric.
+/// Guarantees: only the specified metric type has the assignment applied to it
 #[tokio::test]
 async fn test_assign_metrics_data_point_one_type_only() {
     let query = "gauges | apply data_points {
@@ -1851,6 +1836,29 @@ async fn test_assign_metrics_data_point_one_type_only() {
     .await
 }
 
+/// Scenario: assign a field to all metric data point types from a constant.
+/// Guarantees: the query-engine supports this type of assignment where the result will be an array
+/// that is already aligned to the assignment target
+#[tokio::test]
+async fn test_assign_metrics_data_point_all_from_other_root_scoped_field() {
+    let query = "metrics | apply data_points {
+        set start_time_unix_nano = time_unix_nano
+    }";
+    run_all_data_point_type_test(query, Some(5), Some(6), None, |data| {
+        let new_start_ts = match &data {
+            Data::Gauge(g) => g.data_points[0].start_time_unix_nano,
+            Data::Sum(s) => s.data_points[0].start_time_unix_nano,
+            Data::Histogram(h) => h.data_points[0].start_time_unix_nano,
+            Data::ExponentialHistogram(e) => e.data_points[0].start_time_unix_nano,
+            Data::Summary(s) => s.data_points[0].start_time_unix_nano,
+        };
+        assert_eq!(new_start_ts, 5);
+    })
+    .await
+}
+
+/// Creates a batch containing a single metric of type Gauge containing a single data point with
+/// the specified flags, attrs and int value. It then applies the query and returns the result.
 async fn evaluate_query_on_gauge(
     query: &str,
     flags: Option<u32>,
@@ -1894,8 +1902,8 @@ async fn evaluate_query_on_gauge(
     pipeline.execute(input_batch).await.unwrap()
 }
 
-/// Runs the query applying the pipeline a batch of metrics with a gauge metric
-/// with a single data point and calls validate on the gauge.
+/// Runs the query applying the pipeline a batch of metrics with a gauge metric with a single data
+/// point and calls validate on the gauge.
 async fn run_gauge_assign_test(
     query: &str,
     flags: Option<u32>,
@@ -1929,6 +1937,9 @@ async fn run_gauge_assign_test(
     }
 }
 
+/// Scenario: assign the field on the data point type from an attribute.
+/// Guarantees: the evaluation result, which must be re-aligned to the match the row order of the
+/// data point types is successfully applied to the data point
 #[tokio::test]
 async fn test_assign_metrics_data_point_from_attribute_v2() {
     let query = "gauges | apply data_points {
@@ -1942,6 +1953,10 @@ async fn test_assign_metrics_data_point_from_attribute_v2() {
     .await
 }
 
+/// Scenario: assign the field on the data point type from an attribute on resource / scope.
+/// Guarantees: the evaluation result, which must be re-aligned to the match the row order of the
+/// data point types by a multi-hop join involving the parent metric record batch is successfully
+/// applied to the data point
 #[tokio::test]
 async fn test_assign_metrics_data_point_from_root_parent_attributes() {
     let query = "gauges | apply data_points {
@@ -1964,6 +1979,26 @@ async fn test_assign_metrics_data_point_from_root_parent_attributes() {
     .await;
 }
 
+/// Scenario:
+#[tokio::test]
+async fn test_assign_metrics_data_point_from_fused_attr_eval() {
+    let query = "gauges | apply data_points {
+        set int_value = (attributes[\"x\"] == 5) as Integer
+    }";
+    let attrs = vec![
+        KeyValue::new("x", AnyValue::new_int(5)),
+        KeyValue::new("y", AnyValue::new_int(5)),
+    ];
+    run_gauge_assign_test(query, None, Some(attrs.clone()), None, |gauge| {
+        let value = gauge.data_points[0].value.unwrap();
+        assert_eq!(value, Value::AsInt(1));
+    })
+    .await;
+}
+
+/// Scenario: assign the nullable (e.g. optional) field on the data point from an expression that
+/// will evaluate to null
+/// Guarantees: the evaluation will cause the optional column to be removed.
 #[tokio::test]
 async fn test_assign_metrics_data_point_to_null() {
     let query = "gauges | apply data_points { set int_value = attributes[\"missing\"] }";
