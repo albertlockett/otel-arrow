@@ -1670,7 +1670,7 @@ impl ExprPlanner {
 
                 Ok(Some(ScopedExpr::Eval {
                     scope: DataScope::Record(RecordScope::Signal),
-                    eval: LeafEval::BatchPredicate(Box::new(SignalTypePredicate::new(signal_type))),
+                    eval: LeafEval::BatchEval(Box::new(SignalTypePredicate::new(signal_type))),
                 }))
             }
 
@@ -1871,7 +1871,7 @@ impl ExprPlanner {
 
                     Ok(())
                 }
-                LeafEval::BatchPredicate(_) => {
+                LeafEval::BatchEval(_) => {
                     // TODO add support for expressions such as `is Log as String` which would
                     // produce "true" for log batches, and false otherwise
                     Err(Error::NotYetSupportedError {
@@ -2839,7 +2839,7 @@ mod test {
         assert!(matches!(
             op,
             ScopedExpr::Eval {
-                eval: LeafEval::BatchPredicate(_),
+                eval: LeafEval::BatchEval(_),
                 ..
             }
         ));
