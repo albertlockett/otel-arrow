@@ -990,8 +990,10 @@ impl PipelineStage for AssignPipelineStage {
 
             let mut eval_results = Vec::new();
             for source in &mut self.sources {
-                let eval_result =
-                    source.execute_as_value(&otap_batch, &EvalContext::new(session_context))?;
+                let eval_result = source.execute_as_value(
+                    &otap_batch,
+                    &EvalContext::new(session_context, exec_state),
+                )?;
                 eval_results.push(eval_result);
             }
 
@@ -1079,8 +1081,10 @@ impl PipelineStage for AssignPipelineStage {
         if let ColumnAccessor::NestedAttribute(attrs_id, _, _) = &self.dest_columns[0] {
             let mut eval_results = Vec::new();
             for source in &mut self.sources {
-                let eval_result =
-                    source.execute_as_value(&otap_batch, &EvalContext::new(session_context))?;
+                let eval_result = source.execute_as_value(
+                    &otap_batch,
+                    &EvalContext::new(session_context, exec_state),
+                )?;
                 eval_results.push(eval_result);
             }
 
@@ -1120,7 +1124,7 @@ impl PipelineStage for AssignPipelineStage {
         // one at a time
         for i in 0..self.sources.len() {
             let eval_result = self.sources[i]
-                .execute_as_value(&otap_batch, &EvalContext::new(session_context))?;
+                .execute_as_value(&otap_batch, &EvalContext::new(session_context, exec_state))?;
             let dest_scope = &self.dest_scopes[i];
             match &self.dest_columns[i] {
                 ColumnAccessor::ColumnName(dest_col_name) => {
@@ -1209,7 +1213,7 @@ impl PipelineStage for AssignPipelineStage {
         session_context: &SessionContext,
         _config_options: &ConfigOptions,
         _task_context: Arc<TaskContext>,
-        _exec_options: &mut ExecutionState,
+        exec_state: &mut ExecutionState,
     ) -> Result<RecordBatch> {
         if attrs_record_batch.num_rows() == 0 {
             // nothing to do
@@ -1251,7 +1255,10 @@ impl PipelineStage for AssignPipelineStage {
 
         // evaluate the expression
         let mut result = self.sources[0]
-            .evaluate_on_attrs_batch(&attrs_record_batch, &EvalContext::new(session_context))?
+            .evaluate_on_attrs_batch(
+                &attrs_record_batch,
+                &EvalContext::new(session_context, exec_state),
+            )?
             .to_array(attrs_record_batch.num_rows())?;
 
         // determine the "logical" type of the result (e.g. the array type, or the values if the
@@ -1380,7 +1387,7 @@ impl PipelineStage for AssignPipelineStage {
         session_ctx: &SessionContext,
         _config_options: &ConfigOptions,
         _task_context: Arc<TaskContext>,
-        _exec_state: &mut ExecutionState,
+        exec_state: &mut ExecutionState,
     ) -> Result<OtapArrowRecords> {
         for data_point_type in MetricDataPointType::all() {
             let dp_payload_type = data_point_type.payload_type();
@@ -1389,7 +1396,8 @@ impl PipelineStage for AssignPipelineStage {
                 continue;
             };
 
-            let eval_ctx = EvalContext::new_for_metrics_data_points(data_point_type, session_ctx);
+            let eval_ctx =
+                EvalContext::new_for_metrics_data_points(data_point_type, session_ctx, exec_state);
 
             // if we're assigning to attributes, do it as a bulk attribute upsert for best performance
             if let ColumnAccessor::Attributes(attrs_id, _) = &self.dest_columns[0] {
