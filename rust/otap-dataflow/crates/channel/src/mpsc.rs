@@ -858,4 +858,96 @@ mod tests {
         rt.block_on(local);
         rt.block_on(handle).expect("Test task failed");
     }
+
+    /// A lightweight yield that returns Pending once with an immediate
+    /// wake, without going through tokio's deferred-wake / driver-poll path.
+    async fn yield_once() {
+        let mut yielded = false;
+        core::future::poll_fn(|cx| {
+            if yielded {
+                return Poll::Ready(());
+            }
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await;
+    }
+
+    /// Scenario: 4 producers send to a channel with capacity 64. The
+    /// consumer yields (via immediate re-wake, not tokio::yield_now) after
+    /// every recv, simulating a slow consumer that does work between reads.
+    /// Verifies that: (a) the channel actually fills and senders block
+    /// (SEND_POLL_FULL > 0), confirming the wakeup path is exercised, and
+    /// (b) all messages are delivered.
+    /// Guarantees: the sender-wakeup path is exercised even when the
+    /// consumer yields on every recv, and no messages are lost.
+    #[test]
+    fn test_consumer_yield_every_recv_exercises_wakeup() {
+        let rt = create_test_runtime();
+        let local = tokio::task::LocalSet::new();
+
+        let handle = local.spawn_local(async {
+            let num_producers = 4usize;
+            let capacity = 64usize;
+            let per_producer = 1_000usize;
+            let total_messages = num_producers * per_producer;
+
+            SEND_POLL_TOTAL.with(|c| c.set(0));
+            SEND_POLL_FULL.with(|c| c.set(0));
+
+            let (tx, rx) = Channel::new(capacity);
+
+            let mut producers = Vec::with_capacity(num_producers);
+            for p in 0..num_producers {
+                let tx_clone = tx.clone();
+                producers.push(tokio::task::spawn_local(async move {
+                    for _ in 0..per_producer {
+                        tx_clone
+                            .send_async(p)
+                            .await
+                            .expect("send must succeed");
+                    }
+                }));
+            }
+            drop(tx);
+
+            let consumer = tokio::task::spawn_local(async move {
+                let mut count = 0usize;
+                while let Ok(_v) = rx.recv().await {
+                    count += 1;
+                    yield_once().await;
+                }
+                count
+            });
+
+            let result = timeout(Duration::from_secs(10), async {
+                for p in producers {
+                    p.await.expect("producer task must not panic");
+                }
+                consumer.await.expect("consumer task must not panic")
+            })
+            .await;
+
+            let poll_total = SEND_POLL_TOTAL.with(|c| c.get());
+            let poll_full = SEND_POLL_FULL.with(|c| c.get());
+
+            let received = result.expect("must not deadlock");
+            assert_eq!(received, total_messages, "all messages must be delivered");
+            println!(
+                "poll_total={poll_total}, poll_full={poll_full} \
+                 (full/total = {:.1}%)",
+                100.0 * poll_full as f64 / poll_total.max(1) as f64
+            );
+            assert!(
+                poll_full > 0,
+                "senders must have blocked at least once \
+                 (poll_total={poll_total}, poll_full={poll_full}), \
+                 confirming the wakeup path was exercised"
+            );
+        });
+
+        rt.block_on(local);
+        rt.block_on(handle).expect("Test task failed");
+    }
 }

@@ -256,6 +256,75 @@ fn bench_mpsc_multi_producer(c: &mut Criterion) {
     }
 
     consumer_yield_group.finish();
+
+    // Consumer yields on every recv -- simulates a receiver that is always
+    // slower than its producers, which is the realistic scenario where the
+    // channel stays at capacity. Each recv gives the executor a chance to
+    // run woken senders before the next pop.
+    //
+    // Uses fewer messages since the per-message cost is much higher with
+    // a yield on every recv.
+    const YIELD_EVERY_MSGS: usize = 32_768; // 1024 * 8 * 4
+    let mut consumer_yield_every_group =
+        c.benchmark_group("mpsc_consumer_yield_every_recv");
+    _ = consumer_yield_every_group.throughput(Throughput::Elements(YIELD_EVERY_MSGS as u64));
+
+    for (num_producers, capacity) in PRODUCERS_AND_CAPACITIES {
+        let per_producer = YIELD_EVERY_MSGS / num_producers;
+        if per_producer % capacity != 0 || YIELD_EVERY_MSGS % num_producers != 0 {
+            continue;
+        }
+        let label = format!("cap_{capacity}/{num_producers}_producers");
+        let np = *num_producers;
+        let cap = *capacity;
+        let _ = consumer_yield_every_group.bench_function(
+            BenchmarkId::new("local_mpsc", &label),
+            |b| {
+                b.to_async(&rt).iter(|| async {
+                    let local = LocalSet::new();
+                    let received = local
+                        .run_until(async {
+                            let (tx, rx) = mpsc::Channel::new(cap);
+                            let pp = YIELD_EVERY_MSGS / np;
+
+                            let mut producers = Vec::with_capacity(np);
+                            for p in 0..np {
+                                let tx_clone = tx.clone();
+                                let offset = p * pp;
+                                producers.push(tokio::task::spawn_local(async move {
+                                    for i in 0..pp {
+                                        tx_clone
+                                            .send_async(offset + i)
+                                            .await
+                                            .expect("send must succeed");
+                                    }
+                                }));
+                            }
+                            drop(tx);
+
+                            let yielder = PeriodicYield::new(1);
+                            let consumer = tokio::task::spawn_local(async move {
+                                let mut count = 0usize;
+                                while let Ok(_v) = rx.recv().await {
+                                    count += 1;
+                                    yielder.maybe_yield().await;
+                                }
+                                count
+                            });
+
+                            for p in producers {
+                                p.await.expect("producer task must not panic");
+                            }
+                            consumer.await.expect("consumer task must not panic")
+                        })
+                        .await;
+                    let _ = black_box(received);
+                });
+            },
+        );
+    }
+
+    consumer_yield_every_group.finish();
 }
 
 criterion_group!(benches, bench_mpsc_multi_producer);
