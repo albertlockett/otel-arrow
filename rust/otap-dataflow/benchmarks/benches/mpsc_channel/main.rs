@@ -53,7 +53,6 @@ const PRODUCERS_AND_CAPACITIES: &[(usize, usize)] = &[
 async fn run_workload(
     num_producers: usize,
     capacity: usize,
-    yield_every: Option<usize>,
 ) -> usize {
     let (tx, rx) = mpsc::Channel::new(capacity);
 
