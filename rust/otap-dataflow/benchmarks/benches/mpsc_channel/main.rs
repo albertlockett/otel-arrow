@@ -77,11 +77,6 @@ async fn run_workload(
                     .send_async(offset + i)
                     .await
                     .expect("send must succeed");
-                if let Some(interval) = yield_every {
-                    if i % interval == 0 {
-                        tokio::task::yield_now().await;
-                    }
-                }
             }
         }));
     }
