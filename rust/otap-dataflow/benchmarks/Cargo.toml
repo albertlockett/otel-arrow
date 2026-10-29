@@ -67,6 +67,10 @@ name = "control_channel"
 harness = false
 
 [[bench]]
+name = "mpsc_channel"
+harness = false
+
+[[bench]]
 name = "exporter"
 harness = false
 

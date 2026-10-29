@@ -11,6 +11,17 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
+thread_local! {
+    /// Total number of times SendFuture::poll was called.
+    pub(crate) static SEND_POLL_TOTAL: Cell<usize> = const { Cell::new(0) };
+    /// Number of times SendFuture::poll found the buffer full (wasted poll).
+    pub(crate) static SEND_POLL_FULL: Cell<usize> = const { Cell::new(0) };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SenderWaiterKey {
     // Stable key into the waiter slot array; generation prevents ABA when a
@@ -318,11 +329,7 @@ impl<T> Receiver<T> {
         let mut state = self.channel.state.borrow_mut();
 
         if let Some(value) = state.buffer.pop_front() {
-            // Wake one sender if channel was full
-            if state.buffer.len() == state.capacity - 1 {
-                // Wake one live waiter (FIFO) to avoid thundering-herd wakeups.
-                state.wake_one_sender_waiter();
-            }
+            state.wake_one_sender_waiter();
             Ok(value)
         } else if state.is_closed {
             Err(RecvError::Closed)
@@ -375,6 +382,9 @@ impl<T> Future for SendFuture<T> {
     type Output = Result<(), SendError<T>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        #[cfg(test)]
+        SEND_POLL_TOTAL.with(|c| c.set(c.get() + 1));
+
         let value = self
             .value
             .take()
@@ -383,6 +393,9 @@ impl<T> Future for SendFuture<T> {
         match self.sender.send(value) {
             Ok(()) => Poll::Ready(Ok(())),
             Err(SendError::Full(value)) => {
+                #[cfg(test)]
+                SEND_POLL_FULL.with(|c| c.set(c.get() + 1));
+
                 self.value = Some(value);
                 // Persist the waiter key across polls so we can refresh in place.
                 let mut waiter_key = self.waiter_key;
@@ -732,6 +745,116 @@ mod tests {
             assert_eq!(rx.recv().await.expect("must receive second value"), 2);
         });
 
+        rt.block_on(local);
+        rt.block_on(handle).expect("Test task failed");
+    }
+
+    async fn run_diagnostic(num_producers: usize, capacity: usize, total_messages: usize) {
+        let per_producer = total_messages / num_producers;
+
+        SEND_POLL_TOTAL.with(|c| c.set(0));
+        SEND_POLL_FULL.with(|c| c.set(0));
+
+        let (tx, rx) = Channel::new(capacity);
+
+        let mut producers = Vec::with_capacity(num_producers);
+        for p in 0..num_producers {
+            let tx_clone = tx.clone();
+            producers.push(tokio::task::spawn_local(async move {
+                for _ in 0..per_producer {
+                    tx_clone
+                        .send_async(p)
+                        .await
+                        .expect("send must succeed");
+                }
+            }));
+        }
+        drop(tx);
+
+        let consumer = tokio::task::spawn_local(async move {
+            let mut count = 0usize;
+            while let Ok(_v) = rx.recv().await {
+                count += 1;
+            }
+            count
+        });
+
+        let start = std::time::Instant::now();
+
+        let result = timeout(Duration::from_secs(60), async {
+            for p in producers {
+                p.await.expect("producer task must not panic");
+            }
+            consumer.await.expect("consumer task must not panic")
+        }).await;
+
+        let elapsed = start.elapsed();
+
+        let poll_total = SEND_POLL_TOTAL.with(|c| c.get());
+        let poll_full = SEND_POLL_FULL.with(|c| c.get());
+        let poll_ok = poll_total - poll_full;
+        let actual_total = per_producer * num_producers;
+
+        println!(
+            "--- {num_producers} senders, capacity {capacity}, \
+             {actual_total} msgs ---"
+        );
+        println!("wall time:              {elapsed:?}");
+        println!("SendFuture::poll total: {poll_total}");
+        println!("  -> Ok (useful):       {poll_ok}");
+        println!("  -> Full (wasted):     {poll_full}");
+        println!(
+            "  wasted/useful ratio:  {:.2}",
+            poll_full as f64 / poll_ok.max(1) as f64
+        );
+
+        match result {
+            Ok(received) => {
+                assert_eq!(received, actual_total);
+            }
+            Err(_) => {
+                panic!(
+                    "deadlocked: {num_producers} senders, capacity {capacity}"
+                );
+            }
+        }
+    }
+
+    /// Scenario: 8 producers, capacity 4.
+    /// Guarantees: measures wall-clock and wasted polls at small capacity.
+    #[test]
+    fn test_diagnostic_8_senders_cap_4() {
+        let rt = create_test_runtime();
+        let local = tokio::task::LocalSet::new();
+        let handle = local.spawn_local(async {
+            run_diagnostic(8, 4, 4_000_000).await;
+        });
+        rt.block_on(local);
+        rt.block_on(handle).expect("Test task failed");
+    }
+
+    /// Scenario: 8 producers, capacity 250.
+    /// Guarantees: measures wall-clock and wasted polls at medium capacity.
+    #[test]
+    fn test_diagnostic_8_senders_cap_250() {
+        let rt = create_test_runtime();
+        let local = tokio::task::LocalSet::new();
+        let handle = local.spawn_local(async {
+            run_diagnostic(8, 250, 4_000_000).await;
+        });
+        rt.block_on(local);
+        rt.block_on(handle).expect("Test task failed");
+    }
+
+    /// Scenario: 8 producers, capacity 1000.
+    /// Guarantees: measures wall-clock and wasted polls at large capacity.
+    #[test]
+    fn test_diagnostic_8_senders_cap_1000() {
+        let rt = create_test_runtime();
+        let local = tokio::task::LocalSet::new();
+        let handle = local.spawn_local(async {
+            run_diagnostic(8, 1000, 4_000_000).await;
+        });
         rt.block_on(local);
         rt.block_on(handle).expect("Test task failed");
     }
