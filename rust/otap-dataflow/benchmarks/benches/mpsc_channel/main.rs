@@ -12,9 +12,65 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use otel_arrow_dfe_channel::mpsc;
+use std::cell::Cell;
+use std::future::Future;
 use std::hint::black_box;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::runtime::Builder;
 use tokio::task::LocalSet;
+
+/// A lightweight yield that returns `Pending` once every `interval` calls,
+/// immediately re-waking the task without going through the tokio driver.
+/// This simulates a producer doing work between sends without paying the
+/// cost of a kevent syscall on each yield.
+struct PeriodicYield {
+    interval: usize,
+    count: Cell<usize>,
+    yielded: Cell<bool>,
+}
+
+impl PeriodicYield {
+    fn new(interval: usize) -> Self {
+        Self {
+            interval,
+            count: Cell::new(0),
+            yielded: Cell::new(false),
+        }
+    }
+
+    /// Call this in the send loop. Returns a future that is immediately
+    /// ready most of the time, but returns Pending (with an immediate
+    /// wake) every `interval` calls.
+    fn maybe_yield(&self) -> MaybeYieldFuture<'_> {
+        let c = self.count.get() + 1;
+        self.count.set(c);
+        let should_yield = c % self.interval == 0;
+        self.yielded.set(false);
+        MaybeYieldFuture {
+            parent: self,
+            should_yield,
+        }
+    }
+}
+
+struct MaybeYieldFuture<'a> {
+    parent: &'a PeriodicYield,
+    should_yield: bool,
+}
+
+impl Future for MaybeYieldFuture<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if !self.should_yield || self.parent.yielded.get() {
+            return Poll::Ready(());
+        }
+        self.parent.yielded.set(true);
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
 
 #[cfg(not(windows))]
 use tikv_jemallocator::Jemalloc;
@@ -53,7 +109,8 @@ const PRODUCERS_AND_CAPACITIES: &[(usize, usize)] = &[
 async fn run_workload(
     num_producers: usize,
     capacity: usize,
-    yield_every: Option<usize>,
+    producer_yield_every: Option<usize>,
+    consumer_yield_every: Option<usize>,
 ) -> usize {
     let (tx, rx) = mpsc::Channel::new(capacity);
 
@@ -73,15 +130,14 @@ async fn run_workload(
         let tx_clone = tx.clone();
         let offset = p * per_producer;
         producers.push(tokio::task::spawn_local(async move {
+            let yielder = producer_yield_every.map(PeriodicYield::new);
             for i in 0..per_producer {
                 tx_clone
                     .send_async(offset + i)
                     .await
                     .expect("send must succeed");
-                if let Some(interval) = yield_every {
-                    if i % interval == 0 {
-                        tokio::task::yield_now().await;
-                    }
+                if let Some(y) = &yielder {
+                    y.maybe_yield().await;
                 }
             }
         }));
@@ -90,9 +146,13 @@ async fn run_workload(
     drop(tx);
 
     let consumer = tokio::task::spawn_local(async move {
+        let yielder = consumer_yield_every.map(PeriodicYield::new);
         let mut count = 0usize;
         while let Ok(_v) = rx.recv().await {
             count += 1;
+            if let Some(y) = &yielder {
+                y.maybe_yield().await;
+            }
         }
         count
     });
@@ -124,7 +184,9 @@ fn bench_mpsc_multi_producer(c: &mut Criterion) {
             b.to_async(&rt).iter(|| async {
                 let local = LocalSet::new();
                 let received = local
-                    .run_until(async { run_workload(*num_producers, *capacity).await })
+                    .run_until(async {
+                        run_workload(*num_producers, *capacity, None, None).await
+                    })
                     .await;
                 let _ = black_box(received);
             });
@@ -132,6 +194,68 @@ fn bench_mpsc_multi_producer(c: &mut Criterion) {
     }
 
     group.finish();
+
+    // Same scenarios but producers yield every 32 sends, simulating a
+    // workload where producers do not monopolize the executor. This
+    // breaks up the tight send loop and gives the consumer more
+    // interleaving opportunities, which is closer to a real pipeline
+    // where process() does actual work between sends.
+    //
+    // Only capacities >= 256 are included here. Smaller capacities
+    // with multiple producers can deadlock on unpatched code when
+    // yields disrupt the tight producer-consumer cycle that the buggy
+    // wakeup logic depends on.
+    let mut yield_group = c.benchmark_group("mpsc_multi_producer_yield32");
+    _ = yield_group.throughput(Throughput::Elements(TOTAL_MESSAGES as u64));
+
+    for (num_producers, capacity) in PRODUCERS_AND_CAPACITIES {
+        if *capacity < 256 {
+            continue;
+        }
+        let label = format!("cap_{capacity}/{num_producers}_producers");
+        let _ = yield_group.bench_function(BenchmarkId::new("local_mpsc", &label), |b| {
+            b.to_async(&rt).iter(|| async {
+                let local = LocalSet::new();
+                let received = local
+                    .run_until(async {
+                        run_workload(*num_producers, *capacity, Some(32), None).await
+                    })
+                    .await;
+                let _ = black_box(received);
+            });
+        });
+    }
+
+    yield_group.finish();
+
+    // Producers send as fast as possible (will fill the channel and block),
+    // but the consumer yields every 32 recvs. This simulates a processor
+    // that does real work between reads: the channel stays near capacity,
+    // senders block and get woken, but the consumer periodically gives up
+    // control so woken senders can run.
+    let mut consumer_yield_group =
+        c.benchmark_group("mpsc_multi_producer_consumer_yield32");
+    _ = consumer_yield_group.throughput(Throughput::Elements(TOTAL_MESSAGES as u64));
+
+    for (num_producers, capacity) in PRODUCERS_AND_CAPACITIES {
+        let label = format!("cap_{capacity}/{num_producers}_producers");
+        let _ = consumer_yield_group.bench_function(
+            BenchmarkId::new("local_mpsc", &label),
+            |b| {
+                b.to_async(&rt).iter(|| async {
+                    let local = LocalSet::new();
+                    let received = local
+                        .run_until(async {
+                            run_workload(*num_producers, *capacity, None, Some(32)).await
+                        })
+                        .await;
+                    let _ = black_box(received);
+                });
+            },
+        );
+    }
+
+    consumer_yield_group.finish();
 }
 
 criterion_group!(benches, bench_mpsc_multi_producer);
