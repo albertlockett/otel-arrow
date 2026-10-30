@@ -284,6 +284,18 @@ impl<T> Clone for Sender<T> {
     }
 }
 
+impl<T> Sender<T> {
+    /// Clone that preserves the sender_id (for internal use by SendFuture).
+    fn clone_internal(&self) -> Self {
+        let mut state = self.channel.state.borrow_mut();
+        state.senders += 1;
+        Sender {
+            channel: self.channel.clone(),
+            sender_id: self.sender_id,
+        }
+    }
+}
+
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut state = self.channel.state.borrow_mut();
@@ -337,7 +349,7 @@ impl<T> Sender<T> {
             Ok(()) => Ok(()),
             Err(SendError::Full(value)) => {
                 SendFuture {
-                    sender: self.clone(),
+                    sender: self.clone_internal(),
                     value: Some(value),
                     waiter_key: None,
                 }
