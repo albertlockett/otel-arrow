@@ -35,6 +35,7 @@ struct SenderWaiterSlot {
     waker: Option<Waker>,
     in_use: bool,
     queued: bool,
+    sender_id: usize,
 }
 
 impl SenderWaiterSlot {
@@ -44,6 +45,7 @@ impl SenderWaiterSlot {
             waker: None,
             in_use: false,
             queued: false,
+            sender_id: 0,
         }
     }
 }
@@ -68,7 +70,8 @@ impl SenderWaiters {
         }
     }
 
-    fn wake_one(&mut self) {
+    fn wake_one(&mut self, skip_sender_id: Option<usize>) {
+        let mut skipped_key: Option<SenderWaiterKey> = None;
         while let Some(key) = self.queue.pop_front() {
             let Some(slot) = self.slots.get_mut(key.index) else {
                 continue;
@@ -78,10 +81,21 @@ impl SenderWaiters {
             if !slot.in_use || slot.generation != key.generation || !slot.queued {
                 continue;
             }
+            // If this waiter belongs to the sender we want to deprioritize,
+            // push it to the back and try the next one. Only skip once --
+            // if all waiters belong to the same sender, wake it anyway.
+            if skipped_key.is_none()
+                && skip_sender_id == Some(slot.sender_id)
+                && !self.queue.is_empty()
+            {
+                skipped_key = Some(key);
+                self.queue.push_back(key);
+                continue;
+            }
             slot.queued = false;
             if let Some(waker) = slot.waker.take() {
                 waker.wake();
-                break;
+                return;
             }
         }
     }
@@ -102,7 +116,12 @@ impl SenderWaiters {
         }
     }
 
-    fn register_or_refresh(&mut self, waiter_key: &mut Option<SenderWaiterKey>, waker: &Waker) {
+    fn register_or_refresh(
+        &mut self,
+        waiter_key: &mut Option<SenderWaiterKey>,
+        waker: &Waker,
+        sender_id: usize,
+    ) {
         if let Some(existing_key) = *waiter_key
             && let Some(slot) = self.slots.get_mut(existing_key.index)
             && slot.in_use
@@ -133,6 +152,7 @@ impl SenderWaiters {
         slot.waker = Some(waker.clone());
         slot.in_use = true;
         slot.queued = true;
+        slot.sender_id = sender_id;
 
         let key = SenderWaiterKey { index, generation };
         self.queue.push_back(key);
@@ -163,12 +183,18 @@ struct ChannelState<T> {
     // Waiters are allocated only when the channel becomes full, so uncontended
     // send/recv paths keep the old small state footprint.
     sender_waiters: Option<SenderWaiters>,
+    // Tracks the sender that most recently pushed an item, so the receiver
+    // can deprioritize it when waking blocked senders. This improves fairness
+    // by giving other senders a chance before the last active sender runs
+    // again.
+    last_sender_id: Option<usize>,
+    next_sender_id: usize,
 }
 
 impl<T> ChannelState<T> {
     fn wake_one_sender_waiter(&mut self) {
         if let Some(waiters) = self.sender_waiters.as_mut() {
-            waiters.wake_one();
+            waiters.wake_one(self.last_sender_id);
         }
     }
 
@@ -182,11 +208,12 @@ impl<T> ChannelState<T> {
         &mut self,
         waiter_key: &mut Option<SenderWaiterKey>,
         waker: &Waker,
+        sender_id: usize,
     ) {
         // Keyed waiter slots fix canceled-send stale wakers without wake-all.
         self.sender_waiters
             .get_or_insert_with(SenderWaiters::new)
-            .register_or_refresh(waiter_key, waker);
+            .register_or_refresh(waiter_key, waker, sender_id);
     }
 
     fn unregister_sender_waiter(&mut self, waiter_key: SenderWaiterKey) {
@@ -215,12 +242,15 @@ impl<T> Channel<T> {
                 has_receiver: true,
                 receiver_waker: None,
                 sender_waiters: None,
+                last_sender_id: None,
+                next_sender_id: 1,
             }),
         });
 
         (
             Sender {
                 channel: channel.clone(),
+                sender_id: 0,
             },
             Receiver { channel },
         )
@@ -230,6 +260,7 @@ impl<T> Channel<T> {
 /// A sender for the channel.
 pub struct Sender<T> {
     channel: Rc<Channel<T>>,
+    sender_id: usize,
 }
 
 /// A receiver for the channel.
@@ -239,12 +270,16 @@ pub struct Receiver<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
+        let sender_id;
         {
             let mut state = self.channel.state.borrow_mut();
             state.senders += 1;
+            sender_id = state.next_sender_id;
+            state.next_sender_id += 1;
         }
         Sender {
             channel: self.channel.clone(),
+            sender_id,
         }
     }
 }
@@ -286,6 +321,7 @@ impl<T> Sender<T> {
         }
 
         state.buffer.push_back(value);
+        state.last_sender_id = Some(self.sender_id);
 
         if let Some(waker) = state.receiver_waker.take() {
             waker.wake();
@@ -401,7 +437,11 @@ impl<T> Future for SendFuture<T> {
                 let mut waiter_key = self.waiter_key;
                 {
                     let mut state = self.sender.channel.state.borrow_mut();
-                    state.register_or_refresh_sender_waiter(&mut waiter_key, cx.waker());
+                    state.register_or_refresh_sender_waiter(
+                        &mut waiter_key,
+                        cx.waker(),
+                        self.sender.sender_id,
+                    );
                 }
                 self.waiter_key = waiter_key;
                 Poll::Pending
@@ -945,6 +985,105 @@ mod tests {
                  (poll_total={poll_total}, poll_full={poll_full}), \
                  confirming the wakeup path was exercised"
             );
+        });
+
+        rt.block_on(local);
+        rt.block_on(handle).expect("Test task failed");
+    }
+
+    /// Scenario: 8 producers send to a channel with capacity 4 (tight loop,
+    /// no yields). Tracks which sender produced each message received by the
+    /// consumer to detect whether all senders get fair access or some are
+    /// starved.
+    /// Guarantees: reveals whether the fix introduces sender starvation in
+    /// the never-yield worst case.
+    #[test]
+    fn test_sender_fairness_tight_loop() {
+        let rt = create_test_runtime();
+        let local = tokio::task::LocalSet::new();
+
+        let handle = local.spawn_local(async {
+            let num_producers = 8usize;
+            let capacity = 4usize;
+            let per_producer = 1_000usize;
+            let total_messages = num_producers * per_producer;
+
+            let (tx, rx) = Channel::new(capacity);
+
+            let mut producers = Vec::with_capacity(num_producers);
+            for p in 0..num_producers {
+                let tx_clone = tx.clone();
+                producers.push(tokio::task::spawn_local(async move {
+                    for _ in 0..per_producer {
+                        tx_clone
+                            .send_async(p)
+                            .await
+                            .expect("send must succeed");
+                    }
+                }));
+            }
+            drop(tx);
+
+            // Record the sender ID of every received message
+            let recv_order = Rc::new(RefCell::new(Vec::<usize>::with_capacity(total_messages)));
+            let order_clone = recv_order.clone();
+
+            let consumer = tokio::task::spawn_local(async move {
+                let mut count = 0usize;
+                while let Ok(sender_id) = rx.recv().await {
+                    order_clone.borrow_mut().push(sender_id);
+                    count += 1;
+                }
+                count
+            });
+
+            let result = timeout(Duration::from_secs(10), async {
+                for p in producers {
+                    p.await.expect("producer task must not panic");
+                }
+                consumer.await.expect("consumer task must not panic")
+            })
+            .await;
+
+            let received = result.expect("must not deadlock");
+            assert_eq!(received, total_messages);
+
+            let order = recv_order.borrow();
+
+            // Print the first 40 messages to see the pattern
+            println!("first 40 messages (sender IDs): {:?}", &order[..40]);
+
+            // Print per-sender progress at checkpoints
+            let mut counts = vec![0usize; num_producers];
+            let checkpoint_interval = total_messages / 4;
+            for (i, &sender_id) in order.iter().enumerate() {
+                counts[sender_id] += 1;
+                if (i + 1) % checkpoint_interval == 0 {
+                    let pct: Vec<String> = counts
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "{:.0}%",
+                                100.0 * *c as f64 / per_producer as f64
+                            )
+                        })
+                        .collect();
+                    println!(
+                        "checkpoint {}: {} msgs, per-sender progress: [{}]",
+                        (i + 1) / checkpoint_interval,
+                        i + 1,
+                        pct.join(", ")
+                    );
+                }
+            }
+
+            // Verify all senders completed
+            for (i, count) in counts.iter().enumerate() {
+                assert_eq!(
+                    *count, per_producer,
+                    "sender {i} sent {count}/{per_producer} messages"
+                );
+            }
         });
 
         rt.block_on(local);
