@@ -42,6 +42,48 @@ fn before(message: OtlpProtoMessage) -> Result<PdataPayload, prost::EncodeError>
     })
 }
 
+// Keep the pre-optimization conversion here so both versions run with the same
+// compiler, allocator, fixtures, and registry. Do not preallocate or reuse bytes.
+fn vec_no_prealloc(message: OtlpProtoMessage) -> Result<PdataPayload, prost::EncodeError> {
+    let mut bytes = Vec::new();
+    Ok(match message {
+        OtlpProtoMessage::Logs(logs) => {
+            logs.encode(&mut bytes)?;
+            OtlpProtoBytes::ExportLogsRequest(bytes.into()).into()
+        }
+        OtlpProtoMessage::Metrics(metrics) => {
+            metrics.encode(&mut bytes)?;
+            OtlpProtoBytes::ExportMetricsRequest(bytes.into()).into()
+        }
+        OtlpProtoMessage::Traces(traces) => {
+            traces.encode(&mut bytes)?;
+            OtlpProtoBytes::ExportTracesRequest(bytes.into()).into()
+        }
+    })
+}
+
+// Keep the pre-optimization conversion here so both versions run with the same
+// compiler, allocator, fixtures, and registry. Do not preallocate or reuse bytes.
+fn vec_no_prealloc_encode_raw(
+    message: OtlpProtoMessage,
+) -> Result<PdataPayload, prost::EncodeError> {
+    let mut bytes = Vec::new();
+    Ok(match message {
+        OtlpProtoMessage::Logs(logs) => {
+            logs.encode_raw(&mut bytes);
+            OtlpProtoBytes::ExportLogsRequest(bytes.into()).into()
+        }
+        OtlpProtoMessage::Metrics(metrics) => {
+            metrics.encode_raw(&mut bytes);
+            OtlpProtoBytes::ExportMetricsRequest(bytes.into()).into()
+        }
+        OtlpProtoMessage::Traces(traces) => {
+            traces.encode_raw(&mut bytes);
+            OtlpProtoBytes::ExportTracesRequest(bytes.into()).into()
+        }
+    })
+}
+
 fn logs(count: usize) -> OtlpProtoMessage {
     if count == 0 {
         return OtlpProtoMessage::Logs(Default::default());
@@ -118,6 +160,28 @@ fn bench_conversion(c: &mut Criterion, shape: &str, count: usize, message: OtlpP
             BatchSize::LargeInput,
         );
     });
+    let _ = group.bench_with_input(
+        BenchmarkId::new("vec_no_prealloc", bytes),
+        &message,
+        |b, message| {
+            b.iter_batched(
+                || message.clone(),
+                |input| vec_no_prealloc(black_box(input)).expect("baseline encoding"),
+                BatchSize::LargeInput,
+            );
+        },
+    );
+    let _ = group.bench_with_input(
+        BenchmarkId::new("vec_no_prealloc_encode_raw", bytes),
+        &message,
+        |b, message| {
+            b.iter_batched(
+                || message.clone(),
+                |input| vec_no_prealloc_encode_raw(black_box(input)).expect("baseline encoding"),
+                BatchSize::LargeInput,
+            );
+        },
+    );
     let _ = group.bench_with_input(BenchmarkId::new("after", bytes), &message, |b, message| {
         b.iter_batched(
             || message.clone(),
@@ -129,13 +193,14 @@ fn bench_conversion(c: &mut Criterion, shape: &str, count: usize, message: OtlpP
 }
 
 fn protobuf_payload(c: &mut Criterion) {
-    for count in [0, 1, 128, 8_192] {
+    // for count in [0, 1, 128, 8_192] {
+    for count in [128, 8_192] {
         bench_conversion(c, "logs", count, logs(count));
         bench_conversion(c, "traces", count, traces(count));
         bench_conversion(c, "metrics_few", count, metrics(count, false));
-        if count > 1 {
-            bench_conversion(c, "metrics_many", count, metrics(count, true));
-        }
+        // if count > 1 {
+        //     bench_conversion(c, "metrics_many", count, metrics(count, true));
+        // }
     }
 }
 
