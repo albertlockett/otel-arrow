@@ -28,6 +28,7 @@ criterion.workspace = true
 serde_yaml.workspace = true
 arrow.workspace = true
 futures.workspace = true
+tikv-jemallocator.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 otel-arrow-dfe-pdata = { workspace = true, features = ["testing"] }
 
