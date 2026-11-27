@@ -202,7 +202,7 @@ seems like a solid plan, but I will caveat that by saying a) I didn't
 build any proof of concept for this
 and b) I'm not _really_ very confident with telling the AI what to do. If anyone takes
 this and feeds it to an AI verbatim and it seems to not be producing a good result,
-please don't 
+please don't
 force it! Stop the bot, and we'll talk about what's not working._
 
 ## Where things stand (exists vs. missing)
@@ -473,14 +473,20 @@ Files: `state.rs`, new `assign_variable.rs` (or similar), `expr.rs` (new
 (expose id-gather primitives / a `realign_by_id` helper + a `ptr_eq` fast-path),
 `apply.rs` / `conditional.rs` / `fork.rs` (scope push/pop around child-stage loops).
 
-### C.0 Mutability model (confirmed from source)
+### C.0 Mutability model
 
 `PipelineStage::execute` receives `exec_state: &mut ExecutionState`
 (pipeline.rs:91), and `execute_with_state` threads a single `&mut ExecutionState`
-sequentially through every stage (pipeline.rs:491-502). So the **write side** has
-direct `&mut` access (insert / push / pop), and the **read side** borrows
-`&ExecutionState` shared via `EvalContext` (eval.rs:70,119) during a stage's own
-`execute`. No interior mutability / `RefCell` needed.
+sequentially through every stage (pipeline.rs:491-502). The single-threaded runtime
+evaluates expressions sequentially, so there is never a concurrent reader to
+conflict with a writer.
+
+`EvalContext` must carry `&mut ExecutionState` (it previously held a shared `&`;
+switch it back to `&mut`). Both sides need mutable access: the write stage
+(C.2) inserts variables, and the read leaf (C.3) writes the realigned value back
+into the current scope frame so later reads at the same batch shape are free.
+Expect a small amount of borrow-checker fallout in the recursive eval walk when a
+context that used to be shared becomes `&mut`; it is mechanical to resolve.
 
 ### C.1 Variable storage in `ExecutionState` (`state.rs`)
 
@@ -500,6 +506,14 @@ Accessors:
 - `push_scope()` / `pop_scope()` -- enter/leave a nested pipeline. These govern
   **visibility only** (shadow-restore on pop). They do **not** realign anything;
   alignment is lazy, at read (C.3).
+
+The read leaf (C.3) realigns a stored value to the current batch and writes the
+aligned result back via `set_variable` (into the **top** frame), so a later read at
+the same batch shape finds an already-aligned binding and skips the gather. Because
+write-back always targets the top frame, an aligned copy derived from an outer
+binding is a top-frame shadow that is discarded on `pop_scope` -- the outer
+definition-time binding is never mutated, so sibling scopes that read the same outer
+variable still realign from the original (see C.3).
 
 Clear per batch: a `reset`/clear path consistent with `reset_counters`; a reused
 `ExecutionState` across batches must start with a single empty root frame.
@@ -586,6 +600,47 @@ when it reaches `compute_join_alignment` and hits `EqualScope` (join.rs:285), th
 path is **correct** -- we restored its precondition at the leaf instead of poking a
 hole in the join. The leaf's `execute_as_id_mask` can reuse the existing
 "evaluate as value then convert" path the `bitmap` module already uses.
+
+**Write the realigned value back (so repeated reads do not re-gather).** A gather
+only produces a value aligned to the current batch; it does not persist. Without
+writing it back, every later read of the same variable after a reshape pays the
+gather again. So after the slow path gathers, `set_variable` the realigned
+`ScopedValue` back into the **top** scope frame. The next read walks top-down,
+finds that binding, and its ids `ptr_eq` the current batch -- the fast path -- until
+a later stage reshapes the batch again (new id `Arc`), at which point the read
+re-gathers and overwrites the top-frame binding once more. One re-align per reshape,
+not one per read.
+
+The single rule covers every case uniformly: **on read, if the binding found by the
+top-down walk has ids that `ptr_eq` the current batch, use it as-is; otherwise
+gather-realign and write the result into the top frame.** Worked examples:
+
+```
+logs
+| let sev = severity_number
+| where contains(event_name, "foo")   // reshapes
+| set attributes["a"] = sev           // miss: gather, write back to frame 0
+| where contains(event_name, "bar")   // reshapes again
+| set attributes["b"] = sev           // miss (new ids): gather, overwrite frame 0
+```
+
+```
+logs
+| let sev = severity_number
+| if contains(event_name, "foo") {    // inner frame pushed
+    set attributes["a"] = sev         // miss: gather, write back to INNER frame
+    | where contains(event_name, "bar")
+    | set attributes["b"] = sev       // miss: gather, overwrite inner frame
+  }                                   // inner frame popped: aligned copies discarded
+| set attributes["c"] = sev           // found only in outer frame, ids stale:
+                                      // gather, write back to the (now top) outer frame
+```
+
+In the second example, writing the inner realignments into the inner frame (not the
+outer one) is what lets `set attributes["c"] = sev` realign cleanly from the
+untouched outer `sev` after the branch pops, and is also what would keep a sibling
+branch correct: each branch realigns from the original outer binding into its own
+frame.
 
 ### C.4 Runtime scoping hooks (push/pop around child-stage loops)
 
@@ -690,6 +745,12 @@ Planner/execution integration tests (pattern: `exec_logs_pipeline` in
 - **`ptr_eq` fast-path**: a `let` immediately followed by a read with no reshaping
   in between produces correct values (optionally assert array reuse to confirm the
   fast-path was taken).
+- **Realign write-back / repeated reads after reshape**: a variable read in two
+  stages separated by two reshaping `where`s (as in the first C.3 worked example) --
+  assert both reads are per-record correct. Then assert the write-back actually
+  happens: between two reads at the SAME batch shape (one reshape, two reads), the
+  second read reuses the aligned binding rather than gathering again (e.g. assert
+  the frame now holds an aligned copy, or that the second read hits the fast path).
 
 Error cases: reading an undeclared variable; unsupported RHS for `let`.
 
