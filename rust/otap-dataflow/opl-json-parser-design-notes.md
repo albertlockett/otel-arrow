@@ -195,6 +195,16 @@ value into a `set` whose destination is per-resource; see Part 2 section B.3.)
 
 # Part 2: Implementation plan
 
+_Note from the human: This rest of the document is written by AI based on
+a long conversation I (albert) had with claude about how to go implement this.
+I've proof read it and to me, it
+seems like a solid plan, but I will caveat that by saying a) I didn't
+build any proof of concept for this
+and b) I'm not _really_ very confident with telling the AI what to do. If anyone takes
+this and feeds it to an AI verbatim and it seems to not be producing a good result,
+please don't 
+force it! Stop the bot, and we'll talk about what's not working._
+
 ## Where things stand (exists vs. missing)
 
 - **Expression AST (`rust/contrib/data_engine/expressions`)**: COMPLETE, no
